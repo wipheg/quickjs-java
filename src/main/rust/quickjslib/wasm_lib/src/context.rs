@@ -140,7 +140,7 @@ where
         }
         let _guard = ContextGuard;
 
-        ctx.store_userdata(ContextPtr::new(context_ptr));
+        let _ = ctx.store_userdata(ContextPtr::new(context_ptr));
         f(ctx)
     })
 }
