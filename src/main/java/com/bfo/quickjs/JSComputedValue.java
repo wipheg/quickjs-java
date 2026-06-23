@@ -15,23 +15,14 @@ public interface JSComputedValue {
     public Object get(JSType owner, Object key);
 
     /**
-     * Set the value for the specified property on the specified owner
+     * Set the value for the specified property on the specified owner.
+     * If this default implementation is not overridden, the property is read-only.
      * @param owner the owner object (currently, will always be a JSObject)
      * @param key the key
      * @param value the key
      * @return whether the value was set. Default implementation returns false
      */
     public default boolean set(JSType owner, Object key, Object value) {
-         return false;
-    }
-
-    /**
-     * Delete the value for the specified property on the specified owner
-     * @param owner the owner object (currently, will always be a JSObject)
-     * @param key the key
-     * @return whether the value was deleted. Default implementation returns false
-     */
-    public default boolean delete(JSType owner, Object key) {
          return false;
     }
 
@@ -44,18 +35,11 @@ public interface JSComputedValue {
     }
 
     /**
-     * Return true if this property can be updated by calling {@link #set}
-     * @return true if the property is writable (default to false)
-     */
-    public default boolean isWritable() {
-        return false;
-    }
-
-    /**
-     * Return true if this property can be deleted from its object
+     * Return true if this property may be deleted from the object.
      * @return true if the property is deletable (default to false)
      */
-    public default boolean isDeletable() {
-        return false;
+    public default boolean isDeleteable() {
+        return true;
     }
+
 }

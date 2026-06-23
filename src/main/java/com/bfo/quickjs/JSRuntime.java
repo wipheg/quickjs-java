@@ -670,11 +670,15 @@ public class JSRuntime implements AutoCloseable {
 
     /**
      * Define getter/setter on a property
+     * @param key the property name
+     * @param getter the index to the getter funtion (required, non zero)
+     * @param getter the index to the setter funtion (may be zero)
+     * @param flags a bitmask: 0x01 = property is enumerable, 0x02 = property is deletable
      */
-    void fnObjectDefineProperty(JSObject object, byte[] key, int getter, int setter) {
+    void fnObjectDefineProperty(JSObject object, byte[] key, int getter, int setter, int flags) {
         final JSContext ctx = object.getContext();
         long ptrlen = store(key);
-        long[] r = call("object_define_property_get_set_wasm", ctx.getPointer(), object.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen), getter, setter);
+        long[] r = call("object_define_property_get_set_wasm", ctx.getPointer(), object.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen), getter, setter, flags);
         dealloc(ptrlen);
     }
 

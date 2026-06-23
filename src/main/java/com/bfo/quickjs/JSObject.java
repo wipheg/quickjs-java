@@ -106,13 +106,37 @@ public class JSObject extends AbstractMap<String,Object> implements JSType, Auto
 
     private void set(String key, Object value) {
         if (value instanceof JSComputedValue) {
+            JSComputedValue cv = (JSComputedValue) value;
             Function<List<Object>,Object> getter = new Function<>() {
                 public Object apply(List<Object> args) {
-                    System.out.println("GETTER CALLED: " + args+": myptr="+pointer+" otherptr="+((JSObject)args.get(0)).pointer);
-                    return 42;
+                    JSType target = (JSType)args.get(0);
+                    Object key = args.get(1);
+                    return cv.get(target,key);
                 }
             };
-            ctx.getRuntime().fnObjectDefineProperty(this, ctx.pack(key), ctx.registerProxy(getter), 0);
+            Function<List<Object>,Object> setter = null;
+            boolean hassetter = false;
+            try {
+                hassetter = !cv.getClass().getMethod("set", JSType.class, Object.class, Object.class).isDefault();
+            } catch (Exception e) {}
+            if (hassetter) {
+                // Setter is overridden
+                setter = new Function<>() {
+                    public Object apply(List<Object> args) {
+                        JSType target = (JSType)args.get(0);
+                        Object key = args.get(1);
+                        Object value = args.get(2);
+                        if (!cv.set(target, key, value)) {
+                            throw new IllegalArgumentException("Invalid value");
+                        }
+                        return true;
+                    }
+                };
+            }
+            int getptr = ctx.registerProxy(getter);
+            int setptr = setter == null ? 0 : ctx.registerProxy(setter);
+            int flags = (cv.isEnumerable() ? 1 : 0) + (cv.isDeleteable() ? 2 : 0);
+            ctx.getRuntime().fnObjectDefineProperty(this, ctx.pack(key), getptr, setptr, flags);
         } else {
             ctx.getRuntime().fnObjectPut(this, ctx.pack(key), ctx.pack(value));
         }
