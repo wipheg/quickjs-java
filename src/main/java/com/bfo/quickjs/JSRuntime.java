@@ -230,7 +230,7 @@ public class JSRuntime implements AutoCloseable {
     /**
      * Create a new JSContext
      */
-    public JSContext createContext() {
+    public JSContext newContext() {
         getInstance();
         JSContext ctx = new JSContext(this);
         contexts.put(ctx.getPointer(), ctx);

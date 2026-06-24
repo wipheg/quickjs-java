@@ -37,7 +37,7 @@ public class JSContextTest {
     @Test
     public void testReturnValuesFromEval() throws Exception {
         try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out);
-                JSContext context = runtime.createContext()) {
+                JSContext context = runtime.newContext()) {
             // Test return of null
             {
                 Object result = context.eval("let ra = null; ra");
@@ -128,7 +128,7 @@ public class JSContextTest {
     @Test
     public void testReturnFunctionFromEval() throws Exception {
         try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out);
-                JSContext context = runtime.createContext()) {
+                JSContext context = runtime.newContext()) {
             // Local function
             {
                 Object result = context.eval("let r = function() { return 42; }; r");
@@ -178,7 +178,7 @@ public class JSContextTest {
     @Test
     public void testSetGlobal() throws Exception {
         try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out);
-                JSContext context = runtime.createContext()) {
+                JSContext context = runtime.newContext()) {
             {
                 context.put("a", 42);
                 Object result = context.eval("a");
@@ -220,7 +220,7 @@ public class JSContextTest {
     @Test
     public void testGetGlobal() throws Exception {
         try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out);
-                JSContext context = runtime.createContext()) {
+                JSContext context = runtime.newContext()) {
             {
                 context.put("a", 42);
                 Object result = context.get("a");
@@ -263,7 +263,7 @@ public class JSContextTest {
     @Test
     public void testNativeObjects() throws Exception {
         try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out);
-                JSContext context = runtime.createContext()) {
+                JSContext context = runtime.newContext()) {
 
             context.eval("var a = {a: 1, b: 'Hello'};");
             Object result = context.get("a");
@@ -322,7 +322,7 @@ public class JSContextTest {
     @Test
     public void testNativeObjectFromJavaSide() throws Exception {
         try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out);
-                JSContext context = runtime.createContext()) {
+                JSContext context = runtime.newContext()) {
 
             Map<String, Object> map = context.newObject();
             map.put("a", "Hello");
@@ -361,7 +361,7 @@ public class JSContextTest {
     @Test
     public void testNativeArrays() throws Exception {
         try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out);
-                JSContext context = runtime.createContext()) {
+                JSContext context = runtime.newContext()) {
 
             context.eval("var a = [1, 2, 3];");
             Object result = context.get("a");
@@ -413,7 +413,7 @@ public class JSContextTest {
     @Test
     public void testNativeArraysFromJavaSide() throws Exception {
         try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out);
-                JSContext context = runtime.createContext()) {
+                JSContext context = runtime.newContext()) {
 
             List<Object> list = context.newArray();
             list.add("a");
@@ -453,7 +453,7 @@ public class JSContextTest {
     @Test
     public void exportJavaFunctionsToJS() throws Exception {
         try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out);
-                JSContext context = runtime.createContext()) {
+                JSContext context = runtime.newContext()) {
 
             BiFunction<Integer, Integer, Integer> add = (a, b) -> {
                 return a + b;
@@ -541,7 +541,7 @@ public class JSContextTest {
      */
     @Test
     public void testScriptRuntimeLimit() throws Exception {
-        try (@SuppressWarnings("resource") JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out); JSContext context = runtime.createContext()) {
+        try (@SuppressWarnings("resource") JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out); JSContext context = runtime.newContext()) {
             try {
                 runtime.setRuntimeLimit(1000);
                 context.eval("while(true){}");
@@ -558,7 +558,7 @@ public class JSContextTest {
      */
     @Test
     public void testScriptMemoryLimit() throws Exception {
-        try (@SuppressWarnings("resource") JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out); JSContext context = runtime.createContext()) {
+        try (@SuppressWarnings("resource") JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out); JSContext context = runtime.newContext()) {
             try {
                 runtime.setMemoryLimit(10000);
                 context.eval(
@@ -579,7 +579,7 @@ public class JSContextTest {
     @Test
     public void testExceptionHandling() throws Exception {
         try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out);
-                JSContext context = runtime.createContext()) {
+                JSContext context = runtime.newContext()) {
             try {
                 context.eval("""
                         let a = 1;
@@ -607,7 +607,7 @@ public class JSContextTest {
      */
     @Test
     public void testJavaExceptionHandling() throws Exception {
-        try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out); JSContext context = runtime.createContext()) {
+        try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out); JSContext context = runtime.newContext()) {
             try {
                 BiFunction<Integer, Integer, Integer> add = (a, b) -> {
                     throw new RuntimeException("test");
@@ -636,7 +636,7 @@ public class JSContextTest {
     @Test
     public void testInvokeJSFunction() throws Exception {
         try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out);
-                JSContext context = runtime.createContext()) {
+                JSContext context = runtime.newContext()) {
 
             {
                 context.eval("function a(x, y) { return x + y; };");
@@ -660,7 +660,7 @@ public class JSContextTest {
     @Test
     public void testConstructors() throws Exception {
         JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out);
-        JSContext context = runtime.createContext();
+        JSContext context = runtime.newContext();
         try {
             context.eval("class Foo { constructor(x) { this.a = x; } } function Bar(x) { return x; }");
             final JSFunction foo = (JSFunction)context.eval("Foo");
@@ -695,7 +695,7 @@ public class JSContextTest {
     @Test
     public void promiseSupport() throws Exception {
         try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out);
-                JSContext context = runtime.createContext()) {
+                JSContext context = runtime.newContext()) {
 
             CompletableFuture<Object> r1 = context.evalAsync("let trigger;\n" + //
                     "const manualPromise = new Promise((resolve, reject) => {\n" + //
@@ -726,7 +726,7 @@ public class JSContextTest {
     @Test
     public void simplePromiseSupport() throws Exception {
         try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out);
-                JSContext context = runtime.createContext()) {
+                JSContext context = runtime.newContext()) {
 
             CompletableFuture<Object> r1 = context.evalAsync("await \"Classic resolve\" ");
 
@@ -751,7 +751,7 @@ public class JSContextTest {
     @Test
     public void simplePromiseErrSupport() throws Exception {
         try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out);
-                JSContext context = runtime.createContext()) {
+                JSContext context = runtime.newContext()) {
 
             CompletableFuture<Object> r1 = context.evalAsync("throw Err('hello') ");
 
@@ -771,7 +771,7 @@ public class JSContextTest {
     @SuppressWarnings("rawtypes")
     @Test
     public void completableFutureSupport() throws Exception {
-        try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out); JSContext context = runtime.createContext()) {
+        try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out); JSContext context = runtime.newContext()) {
             {
                 CompletableFuture<Object> promise = new CompletableFuture<>();
                 context.put("p0", promise);
@@ -816,7 +816,7 @@ public class JSContextTest {
     @Test
     public void functionsCanReturnCompletableFutures() throws Exception {
         try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out);
-                JSContext context = runtime.createContext()) {
+                JSContext context = runtime.newContext()) {
 
             CompletableFuture<Integer> cf = new CompletableFuture<>();
 
@@ -850,7 +850,7 @@ public class JSContextTest {
 
     @Test
     public void testPromiseCanDependOnFuture() throws Exception {
-        try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out); JSContext context = runtime.createContext()) {
+        try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out); JSContext context = runtime.newContext()) {
 
             context.put("answer", new Supplier<Object>() {
                 public Object get() {
@@ -878,7 +878,7 @@ public class JSContextTest {
     @Test
     public void testComputableValue() throws Exception {
         JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out);
-        JSContext context = runtime.createContext();
+        JSContext context = runtime.newContext();
         try {
             // Create a single computed-value property assigned to two 
             // keys. Set one value sets the value for the other.
