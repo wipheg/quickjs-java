@@ -21,7 +21,7 @@ public class JSRuntime implements AutoCloseable {
     private InputStream stdin;
     private OutputStream stdout, stderr;
     private final Map<Long,JSContext> contexts = new HashMap<>();
-    private final Logger logger;
+    private Logger logger;
     private long pointer;                   // Pointer to the runtime in the wasm library.
     private long scriptRuntimeLimit;
     private long scriptStart;
@@ -142,18 +142,22 @@ public class JSRuntime implements AutoCloseable {
     }
 
     /**
-     * Create a new JSRuntime with the default Logger
+     * Create a new JSRuntime
      */
     public JSRuntime() {
-        this(Logger.toSystem());
     }
 
     /**
-     * Create a new JSRuntime with the specified Logger
-     * @param logger the logger
+     * Set the Logger
+     * @param logger the logger, or null to use the default
+     * @return this
      */
-    public JSRuntime(Logger logger) {
+    public JSRuntime setLogger(Logger in) {
+        if (instance != null) {
+            throw new IllegalStateException("Already created");
+        }
         this.logger = logger;
+        return this;
     }
 
     /**
@@ -253,6 +257,9 @@ public class JSRuntime implements AutoCloseable {
      * Return the logger specified in the constructor
      */
     public Logger getLogger() {
+        if (logger == null) {
+            logger = Logger.toSystem();
+        }
         return logger;
     }
 
@@ -359,7 +366,7 @@ public class JSRuntime implements AutoCloseable {
             this.pointer = fnRuntimeCreate();
 
             int level;
-            for (level=Logger.ERROR;level<=Logger.TRACE && logger.isLoggable(level);level++);
+            for (level=Logger.ERROR;level<=Logger.TRACE && getLogger().isLoggable(level);level++);
             fnRuntimeInitLogger(Math.min(level, Logger.TRACE));
             if (memoryLimit > 0) {
                 fnRuntimeSetMemoryLimit(memoryLimit);
