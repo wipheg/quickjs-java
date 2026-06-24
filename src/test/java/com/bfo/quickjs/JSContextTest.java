@@ -259,6 +259,14 @@ public class JSContextTest {
                 Object result = context.get("a");
                 assertEquals(Map.of("b", 42), result);
             }
+            {
+                // Check Context is a regular Map with keyset, remove etc
+                assertTrue(context.keySet().contains("a"));
+                int size = context.size();
+                context.remove("a");
+                assertFalse(context.keySet().contains("a"));
+                assertTrue(context.size() + 1 == size);
+            }
         }
     }
 

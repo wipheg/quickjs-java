@@ -7,9 +7,11 @@ import java.nio.charset.*;
 
 /**
  * A JS Context is the context within which all javascript operations are
- * run. Contexts within the same runtime share code but not data.
+ * run. Contexts within the same runtime share code but not data. The context
+ * also represents the "globalThis" object and so can be iterated just like
+ * a regular JSObject.
  */
-public class JSContext implements AutoCloseable {
+public class JSContext extends AbstractMap<String,Object> implements AutoCloseable {
 
     private final JSRuntime runtime;
     private final List<AutoCloseable> closeables = new ArrayList<>();   // Dependents that are closed when we're closed
@@ -17,6 +19,7 @@ public class JSContext implements AutoCloseable {
     private final Map<Object,JSObject> exportProxies = new HashMap<>(); // Map of @JSExport-implementing-Object => JSObject
     private final Packer packer;
     private final Deque<Runnable> pollqueue = new ConcurrentLinkedDeque<Runnable>();
+    private final JSObject globals;
     private long pointer;
     private int generation;
     private JSException pendingRejection;
@@ -27,6 +30,7 @@ public class JSContext implements AutoCloseable {
         this.runtime = runtime;
         this.packer = new Packer(this);
         this.pointer = runtime.fnContextCreate();
+        this.globals = (JSObject)unpack(runtime.fnGlobals(this));
         proxies.add(null);      // index 0 is never used
     }
 
@@ -175,29 +179,16 @@ public class JSContext implements AutoCloseable {
         return p;
     }
 
-    /**
-     * Put a property on the "globalThis" object for this context
-     */
-    public void put(String key, Object value) {
-        byte[] data = pack(value);
-        data = getRuntime().fnContextPut(this, key, data);
-        value = unpack(data);
-        if (value instanceof RuntimeException) {
-            throw (RuntimeException)value;
-        } else if (value != null) {
-            throw new RuntimeException("Unexpected response");
-        }
+    @Override public Object put(String key, Object value) {
+        return globals.put(key, value);
     }
 
-    /**
-     * Get a property frmo the "globalThis" object for this context
-     */
-    public Object get(String key) {
-        Object value = unpack(getRuntime().fnContextGet(this, key));
-        if (value instanceof RuntimeException) {
-            throw (RuntimeException)value;
-        }
-        return value;
+    @Override public int size() {
+        return globals.size();
+    }
+
+    @Override public Set<Map.Entry<String,Object>> entrySet() {
+        return globals.entrySet();
     }
 
     /**

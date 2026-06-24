@@ -578,6 +578,17 @@ public class JSRuntime implements AutoCloseable {
     }
 
     /**
+     * Return the Globals object for this context
+     */
+    byte[] fnGlobals(JSContext ctx) {
+        long[] r = call("globals_wasm", ctx.getPointer());
+        long ptrlen = r[0];
+        byte[] data = fetch(ptrlen);
+        dealloc(ptrlen);
+        return data;
+    }
+
+    /**
      * Close a context
      */
     void fnContextClose(JSContext ctx) {
@@ -599,35 +610,6 @@ public class JSRuntime implements AutoCloseable {
     byte[] fnEvalScriptAsync(JSContext ctx, String script) {
         long ptrlen = store(script.getBytes(StandardCharsets.UTF_8));
         long[] r = call("eval_script_async_wasm", ctx.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
-        dealloc(ptrlen);
-        ptrlen = r[0];
-        byte[] data = fetch(ptrlen);
-        dealloc(ptrlen);
-        return data;
-    }
-
-    /**
-     * Put a value on an object
-     * @return an exception or null
-     */
-    byte[] fnContextPut(JSContext ctx, String key, byte[] value) {
-        long kptrlen = store(key.getBytes(StandardCharsets.UTF_8));
-        long vptrlen = store(value);
-        long[] r = call("set_global_wasm", ctx.getPointer(), ptrlen2ptr(kptrlen), ptrlen2len(kptrlen), ptrlen2ptr(vptrlen), ptrlen2len(vptrlen));
-        dealloc(kptrlen);
-        dealloc(vptrlen);
-        long ptrlen = r[0];
-        byte[] data = fetch(ptrlen);
-        dealloc(ptrlen);
-        return data;
-    }
-
-    /**
-     * Get a value from an object
-     */
-    byte[] fnContextGet(JSContext ctx, String key) {
-        long ptrlen = store(key.getBytes(StandardCharsets.UTF_8));
-        long[] r = call("get_global_wasm", ctx.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
         dealloc(ptrlen);
         ptrlen = r[0];
         byte[] data = fetch(ptrlen);

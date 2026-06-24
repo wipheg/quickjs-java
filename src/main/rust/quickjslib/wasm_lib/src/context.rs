@@ -75,21 +75,8 @@ pub fn invoke(ctx: &Ctx<'_>, name: String, args: JSJavaProxy) -> rquickjs::Resul
 }
 
 #[wasm_export]
-pub fn set_global(
-    ctx: &Ctx<'_>,
-    name: String,
-    value: JSJavaProxy,
-) -> rquickjs::Result<JSJavaProxy> {
-    debug!("Setting global: {} = {:?}", name, value);
-    let global = ctx.globals();
-    global.set(name.clone(), value)?;
-    Ok(JSJavaProxy::Null)
-}
-
-#[wasm_export]
-pub fn get_global(ctx: &Ctx<'_>, name: String) -> rquickjs::Result<JSJavaProxy> {
-    let global = ctx.globals();
-    global.get(name.clone())?
+pub fn globals(ctx: &Ctx<'_>) -> rquickjs::Result<JSJavaProxy> {
+    JSJavaProxy::convert(ctx.globals().as_value().clone())
 }
 
 thread_local! {
