@@ -112,15 +112,15 @@ public class JSObject extends AbstractMap<String,Object> implements JSType, Auto
                     return "wrapper(getter(" + cv + "))";
                 }
                 public Object apply(List<Object> args) {
-                    JSType target = (JSType)args.get(0);
-                    Object key = args.get(1);
-                    return cv.get(target,key);
+                    JSObject owner = (JSObject)args.get(0);
+                    String key = args.get(1) == null ? null : args.get(1).toString();   // not expecting null
+                    return cv.get(owner, key);
                 }
             };
             Function<List<Object>,Object> setter = null;
             boolean hassetter = false;
             try {
-                hassetter = !cv.getClass().getMethod("set", JSType.class, Object.class, Object.class).isDefault();
+                hassetter = !cv.getClass().getMethod("set", JSObject.class, String.class, Object.class).isDefault();
             } catch (Exception e) {}
             if (hassetter) {
                 // Setter is overridden
@@ -129,10 +129,10 @@ public class JSObject extends AbstractMap<String,Object> implements JSType, Auto
                         return "wrapper(setter(" + cv + "))";
                     }
                     public Object apply(List<Object> args) {
-                        JSType target = (JSType)args.get(0);
-                        Object key = args.get(1);
+                        JSObject owner = (JSObject)args.get(0);
+                        String key = args.get(1) == null ? null : args.get(1).toString(); // not expecting null
                         Object value = args.get(2);
-                        cv.set(target, key, value);
+                        cv.set(owner, key, value);
                         return null;
                     }
                 };

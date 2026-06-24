@@ -1051,10 +1051,10 @@ public class JSContextTest {
             // Default value is empty string. getter returns NNN(value) where NNN is upper-case property name.
             JSComputedValue value = new JSComputedValue() {
                 private Object v = null;
-                @Override public Object get(JSType owner, Object key) {
+                @Override public Object get(JSObject owner, String key) {
                     return key.toString().toUpperCase() + "(" + (v == null ? "" : v) + ")";
                 }
-                @Override public void set(JSType owner, Object key, Object val) {
+                @Override public void set(JSObject owner, String key, Object val) {
                     v = val;
                 }
             };

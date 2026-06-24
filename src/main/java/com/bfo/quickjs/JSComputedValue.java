@@ -8,21 +8,21 @@ public interface JSComputedValue {
 
     /**
      * Return the value for the specified property on the specified owner
-     * @param owner the owner object (currently, will always be a JSObject)
+     * @param owner the owner object
      * @param key the key
      * @return the object value
      */
-    public Object get(JSType owner, Object key);
+    public Object get(JSObject owner, String key);
 
     /**
      * Set the value for the specified property on the specified owner.
      * If this default implementation is not overridden, the property is read-only.
-     * @param owner the owner object (currently, will always be a JSObject)
+     * @param owner the owner object
      * @param key the key
      * @param value the key
      * @throws RuntimeException if the value is invalid
      */
-    public default void set(JSType owner, Object key, Object value) {
+    public default void set(JSObject owner, String key, Object value) {
     }
 
     /**

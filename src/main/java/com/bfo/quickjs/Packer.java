@@ -342,7 +342,7 @@ class Packer {
                         public String toString() {
                             return "[JSComputedValue getter for \"" + name + "\"]";
                         }
-                        @Override public Object get(JSType owner, Object key) {
+                        @Override public Object get(JSObject owner, String key) {
                             try {
                                 if (p.getter instanceof Field) {
                                     return ((Field)p.getter).get(object);
@@ -372,10 +372,10 @@ class Packer {
                             public String toString() {
                                 return "[JSComputedValue getter/setter for \"" + name + "\"]";
                             }
-                            @Override public Object get(JSType owner, Object key) {
+                            @Override public Object get(JSObject owner, String key) {
                                 return fcv.get(owner, key);
                             }
-                            @Override public void set(JSType owner, Object key, Object value) {
+                            @Override public void set(JSObject owner, String key, Object value) {
                                 try {
                                     if (p.setter instanceof Field) {
                                         ((Field)p.setter).set(object, marshall(((Field)p.setter).getType(), value));
