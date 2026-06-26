@@ -244,9 +244,39 @@ public class JSContext extends AbstractMap<String,Object> implements AutoCloseab
         return runtime.doLater(new Task<Object>("eval " + getPointer()) {
             public void run() {
                 final Task<Object> task = this;
-                final int proxySize0 = proxies.size();
                 lastAsyncTask = this;
                 byte[] data = runtime.fnEvalScriptAsync(JSContext.this, script);
+                Object o = unpack(data);
+                if (o instanceof RuntimeException) {
+                    completeExceptionally((RuntimeException)o);
+                } else {
+                    bump();
+                    final JSPromise promise = (JSPromise)o;
+                    promise.handle((Object result, Throwable error) -> {
+                        if (error != null) {
+                            task.completeExceptionally(error);
+                        } else {
+                            task.completeOrChain(result);
+                        }
+                        return null;
+                    });
+                }
+            }
+        });
+    }
+
+    /**
+     * Evaluate an ES6 module and return a Future that will complete when the module has loaded
+     * @param name the module name
+     * @param script the script
+     * @return a future that will complete when the module has loaded
+     */
+    public CompletableFuture<Object> evalModule(String name, String script) {
+        return runtime.doLater(new Task<Object>("evalModule " + getPointer()) {
+            public void run() {
+                final Task<Object> task = this;
+                lastAsyncTask = this;
+                byte[] data = runtime.fnEvalModule(JSContext.this, name, script);
                 Object o = unpack(data);
                 if (o instanceof RuntimeException) {
                     completeExceptionally((RuntimeException)o);
