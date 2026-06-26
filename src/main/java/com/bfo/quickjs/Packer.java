@@ -289,16 +289,8 @@ class Packer {
                                 }
                                 try {
                                     return method.invoke(object, values);
-                                } catch (InvocationTargetException e) {
-                                    e.printStackTrace();
-                                    Throwable e2 = e.getCause();
-                                    if (!(e2 instanceof RuntimeException)) {
-                                        e2 = new RuntimeException(e2);
-                                    }
-                                    throw (RuntimeException)e2;
                                 } catch (Exception e) {
-                                    e.printStackTrace();
-                                    throw new RuntimeException(e);
+                                    throw JSRuntime.toRuntimeException(e);
                                 }
                             }
                         });
@@ -356,7 +348,7 @@ class Packer {
                                 }
                                 throw (RuntimeException)e2;
                             } catch (Exception e) {
-                                throw new RuntimeException(e);
+                                throw JSRuntime.toRuntimeException(e);
                             }
                         }
                         @Override public boolean isHidden() {
@@ -382,14 +374,8 @@ class Packer {
                                     } else {
                                         ((Method)p.setter).invoke(object, marshall(((Method)p.setter).getParameterTypes()[0], value));
                                     }
-                                } catch (InvocationTargetException e) {
-                                    Throwable e2 = e.getCause();
-                                    if (!(e2 instanceof RuntimeException)) {
-                                        e2 = new RuntimeException(e2);
-                                    }
-                                    throw (RuntimeException)e2;
                                 } catch (Exception e) {
-                                    throw new RuntimeException(e);
+                                    throw JSRuntime.toRuntimeException(e);
                                 }
                             }
                             @Override public boolean isHidden() {

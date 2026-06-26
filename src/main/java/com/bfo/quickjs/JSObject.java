@@ -5,19 +5,23 @@ import java.util.function.*;
 import java.lang.reflect.*;
 
 /**
- * Represents a JavaScript "Object" type
+ * Represents a JavaScript "Object" type.
+ * The internal state of this object will be cached as much as possible, and the cached
+ * value invalidated whenever the context is updated by a call to <code>eval</code> or
+ * a promise resolving.
  */
 public class JSObject extends AbstractMap<String,Object> implements JSType, AutoCloseable {
 
     private static final Object UNSET = new Object();
     private final JSContext ctx;
-    private final long pointer;
-    private int gen;
-    private Set<Map.Entry<String,Object>> entryset;
+    private volatile long pointer;
+    private volatile int generation;
+    private volatile JSEntrySet entryset;
 
     JSObject(JSContext ctx, long pointer) {
         this.ctx = ctx;
         this.pointer = pointer;
+        ctx.addCloseable(this);
     }
 
     @Override public long getPointer() {
@@ -28,70 +32,47 @@ public class JSObject extends AbstractMap<String,Object> implements JSType, Auto
         return ctx;
     }
 
+    final boolean isClosed() {
+        return pointer == 0;
+    }
+
     @Override public int size() {
         return entrySet().size();
     }
 
     @Override public Set<Map.Entry<String,Object>> entrySet() {
-        final int nowgen = ctx.getGeneration();
-        if (entryset == null || gen != nowgen) {
-            gen = nowgen;
-            entryset = new AbstractSet<Map.Entry<String,Object>>() {
-                int size = -1;
-                List<JSEntry> data;
-                @Override public int size() {
-                    if (size < 0) {
-                        size = ctx.getRuntime().fnObjectSize(JSObject.this);
-                    }
-                    return size;
+        final int contextGeneration = ctx.getGeneration();
+        if (entryset == null || generation < contextGeneration) {
+            synchronized(this) {
+                if (entryset == null || generation < contextGeneration) {
+                    entryset = new JSEntrySet(contextGeneration);
+                    generation = contextGeneration;
                 }
-                @Override public Iterator<Map.Entry<String,Object>> iterator() {
-                    if (data == null) {
-                        @SuppressWarnings("unchecked") Collection<Object> c = (Collection<Object>)ctx.unpack(ctx.getRuntime().fnObjectKeySet(JSObject.this));
-                        if (size < 0) {
-                            size = c.size();
-                        }
-                        data = new ArrayList<JSEntry>(size);
-                        for (Object o : c) {
-                            data.add(new JSEntry((String)o));
-                        }
-                    }
-                    return new Iterator<Map.Entry<String,Object>>() {
-                        int i = 0;
-                        boolean removed;
-                        @Override public boolean hasNext() {
-                            if (nowgen != ctx.getGeneration()) {
-                                throw new ConcurrentModificationException();
-                            }
-                            return i < data.size();
-                        }
-                        @Override public Map.Entry<String,Object> next() {
-                            if (i == data.size()) {
-                                throw new NoSuchElementException();
-                            }
-                            if (nowgen != ctx.getGeneration()) {
-                                throw new ConcurrentModificationException();
-                            }
-                            removed = false;
-                            return data.get(i++);
-                        }
-                        @Override public void remove() {
-                            if (i == 0 || removed) {
-                                throw new IllegalStateException();
-                            }
-                            if (nowgen != ctx.getGeneration()) {
-                                throw new ConcurrentModificationException();
-                            }
-                            data.get(i - 1).remove();
-                            data.remove(--i);
-                            size--;
-                            removed = true;
-                        }
-                    };
-                }
-            };
+            }
         }
         return entryset;
+    }
+
+    @Override public Object get(Object key) {
+        if (!(key instanceof String)) {
+            return null;
+        }
+        // Otherwise simple globalThis.get() may fail, as we call keyset, then poll, then iterate the keyset values
+        byte[] b = ctx.pack(key);
+        Object value = ctx.unpack(ctx.getRuntime().fnObjectGet(JSObject.this, ctx.pack(key)));
+        JSEntrySet entryset = this.entryset;
+        if (entryset != null) {
+            List<JSEntry> l = entryset.data;
+            if (l != null) {
+                for (JSEntry e : l) {
+                    if (e.getKey().equals(key)) {
+                        e.updateValue(value);
+                        break;
+                    }
+                }
+            }
+        }
+        return value;
     }
 
     @Override public Object put(String key, Object value) {
@@ -104,16 +85,10 @@ public class JSObject extends AbstractMap<String,Object> implements JSType, Auto
         return oldValue;
     }
 
-    @Override public Object get(Object key) {
-        if (!(key instanceof String)) {
-            return null;
-        }
-        byte[] b = ctx.pack(key);
-        Object value = ctx.unpack(ctx.getRuntime().fnObjectGet(JSObject.this, ctx.pack(key)));
-        return value;
-    }
-
     private void set(String key, Object value) {
+        if (isClosed()) {
+            throw new IllegalStateException("Object closed");
+        }
         if (value instanceof JSComputedValue) {
             JSComputedValue cv = (JSComputedValue) value;
             Function<List<Object>,Object> getter = new Function<>() {
@@ -155,10 +130,74 @@ public class JSObject extends AbstractMap<String,Object> implements JSType, Auto
         }
     }
 
+    private class JSEntrySet extends AbstractSet<Map.Entry<String,Object>> {
+        private final int contextGeneration;
+        int size = -1;
+        List<JSEntry> data;
+        JSEntrySet(int contextGeneration) {
+            this.contextGeneration = contextGeneration;
+        }
+        @Override public int size() {
+            if (isClosed()) {
+                throw new IllegalStateException("Object closed");
+            }
+            if (size < 0) {
+                size = ctx.getRuntime().fnObjectSize(JSObject.this);
+            }
+            return size;
+        }
+        @Override public Iterator<Map.Entry<String,Object>> iterator() {
+            if (data == null) {
+                if (isClosed()) {
+                    throw new IllegalStateException("Object closed");
+                }
+                @SuppressWarnings("unchecked") Collection<Object> c = (Collection<Object>)ctx.unpack(ctx.getRuntime().fnObjectKeySet(JSObject.this));
+                if (size < 0) {
+                    size = c.size();
+                }
+                data = new ArrayList<JSEntry>(size);
+                for (Object o : c) {
+                    data.add(new JSEntry((String)o));
+                }
+            }
+            return new Iterator<Map.Entry<String,Object>>() {
+                int i = 0;
+                boolean removed;
+                @Override public boolean hasNext() {
+                    if (contextGeneration != ctx.getGeneration()) {
+                        throw new ConcurrentModificationException();
+                    }
+                    return i < data.size();
+                }
+                @Override public Map.Entry<String,Object> next() {
+                    if (i == data.size()) {
+                        throw new NoSuchElementException();
+                    }
+                    if (contextGeneration != ctx.getGeneration()) {
+                        throw new ConcurrentModificationException();
+                    }
+                    removed = false;
+                    return data.get(i++);
+                }
+                @Override public void remove() {
+                    if (i == 0 || removed) {
+                        throw new IllegalStateException();
+                    }
+                    if (contextGeneration != ctx.getGeneration()) {
+                        throw new ConcurrentModificationException();
+                    }
+                    data.get(i - 1).remove();
+                    data.remove(--i);
+                    size--;
+                    removed = true;
+                }
+            };
+        }
+    }
+
     private class JSEntry implements Map.Entry<String,Object> {
         private final String key;
         private Object value;
-        private int gen;
 
         JSEntry(String key) {
             this.key = key;
@@ -180,10 +219,14 @@ public class JSObject extends AbstractMap<String,Object> implements JSType, Auto
             return value;
         }
 
+        void updateValue(Object value) {
+            this.value = value;
+        }
+
         @Override public Object setValue(Object value) {
             Object oldvalue = getValue();    // updates generation
             set(key, value);
-            this.value = value;
+            updateValue(value);
             return oldvalue;
         }
 
@@ -193,7 +236,10 @@ public class JSObject extends AbstractMap<String,Object> implements JSType, Auto
     }
 
     @Override public void close() throws Exception {
-        ctx.getRuntime().fnObjectClose(this);
+        if (!isClosed()) {
+            ctx.getRuntime().fnObjectClose(this);
+            pointer = 0;
+        }
     }
 
     /**

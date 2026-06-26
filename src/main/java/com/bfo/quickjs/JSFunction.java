@@ -5,11 +5,11 @@ import java.util.*;
 /**
  * Represents a JavaScript Function type
  */
-public class JSFunction implements JSType {
+public class JSFunction implements JSType, AutoCloseable {
 
-    final JSContext ctx;
-    final long pointer;
-    final String name;
+    private final JSContext ctx;
+    private final String name;
+    private volatile long pointer;
     private Boolean constructor;
     private int index;
 
@@ -17,19 +17,28 @@ public class JSFunction implements JSType {
         this.ctx = ctx;
         this.name = name;
         this.pointer = pointer;
+        ctx.addCloseable(this);
     }
 
+    /**
+     * Return the name of the function
+     */
     public String getName() {
         return name;
+    }
+
+    @Override public JSContext getContext() {
+        return ctx;
     }
 
     @Override public long getPointer() {
         return pointer;
     }
 
-    @Override public JSContext getContext() {
-        return ctx;
+    final boolean isClosed() {
+        return pointer == 0;
     }
+
 
     void setIndex(int index) {
         this.index = index;
@@ -70,5 +79,12 @@ public class JSFunction implements JSType {
 
     public String toString() {
         return "{JSFunction " + ctx.getPointer() + "/" + index + "}";
+    }
+
+    @Override public void close() throws Exception {
+        if (!isClosed()) {
+            ctx.getRuntime().fnFunctionClose(this);
+            pointer = 0;
+        }
     }
 }

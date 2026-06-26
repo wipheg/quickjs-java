@@ -3,6 +3,8 @@ package com.bfo.quickjs;
 import java.util.*;
 import java.util.function.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.lang.reflect.InvocationTargetException;
 import java.io.*;
 import java.nio.charset.*;
 import com.dylibso.chicory.runtime.*;
@@ -14,14 +16,15 @@ import com.dylibso.chicory.wasm.WasmModule;
  * The JS Runtime may contain one or more JS Contexts. It is the entry point into the API
  */
 public class JSRuntime implements AutoCloseable {
-    
 
-    private Instance instance;          // WASM instance
-    private InputStream stdin;
-    private OutputStream stdout, stderr;
-    private final Map<Long,JSContext> contexts = new HashMap<>();
+    private volatile Instance instance;                 // WASM instance
+    private TaskManager tasker;
     private JSLogger logger;
-    private long pointer;                   // Pointer to the runtime in the wasm library.
+    private long threadId;                              // The ID of the Thread that will run all our tasks. Set by TaskManager
+    private final Map<Long,JSContext> contexts = new HashMap<>();
+    private InputStream stdin;                          // Streams
+    private OutputStream stdout, stderr;
+    private volatile long pointer;                      // Pointer to the runtime in the wasm library.
     private long scriptRuntimeLimit;
     private long scriptStart;
     private int memoryLimit;
@@ -33,8 +36,54 @@ public class JSRuntime implements AutoCloseable {
     }
 
     /**
-     * Set the JSLogger
+     * Set the {@link TaskManager} to use for this JSRuntime, or null to use the default
+     * @param taskManager the taskManager
+     * @throws IllegalStateException if the runtime has already started
+     * @return this
+     */
+    public JSRuntime setTaskManager(TaskManager taskManager) {
+        if (instance != null) {
+            throw new IllegalStateException("Already created");
+        }
+        this.tasker = taskManager;
+        return this;
+    }
+
+    final boolean isClosed() {
+        return pointer == 0;
+    }
+
+    static RuntimeException toRuntimeException(Throwable e) {
+        if (e instanceof RuntimeException) {
+            return (RuntimeException)e;
+        } else if (e instanceof ExecutionException) {
+            return toRuntimeException(e.getCause());
+        } else if (e instanceof InvocationTargetException) {
+            return toRuntimeException(e.getCause());
+        } else {
+            throw new RuntimeException(e);
+        }
+    }
+
+    void setThreadId(long id) {
+        this.threadId = id;
+    }
+
+    long getThreadId() {
+        return threadId;
+    }
+
+    private TaskManager getTaskManager() {
+        if (tasker == null) {
+            tasker = TaskManager.useSharedThread();
+        }
+        return tasker;
+    }
+
+    /**
+     * Set the Logger
      * @param logger the logger, or null to use the default
+     * @throws IllegalStateException if the runtime has already started
      * @return this
      */
     public JSRuntime setLogger(JSLogger logger) {
@@ -49,6 +98,7 @@ public class JSRuntime implements AutoCloseable {
      * Set the InputStream to read as stdin, or null for none (the default)
      * Must be called before the first context is created
      * @param in the InputStream, or null
+     * @throws IllegalStateException if the runtime has already started
      * @return this
      */
     public JSRuntime setStdin(InputStream in) {
@@ -63,6 +113,7 @@ public class JSRuntime implements AutoCloseable {
      * Set the OutputStream to write to as stdout, or null for none (the default)
      * Must be called before the first context is created
      * @param out the OutputStream, or null
+     * @throws IllegalStateException if the runtime has already started
      * @return this
      */
     public JSRuntime setStdout(OutputStream out) {
@@ -77,6 +128,7 @@ public class JSRuntime implements AutoCloseable {
      * Set the OutputStream to write to as stderr, or null for none (the default)
      * Must be called before the first context is created
      * @param err the OutputStream, or null
+     * @throws IllegalStateException if the runtime has already started
      * @return this
      */
     public JSRuntime setStderr(OutputStream err) {
@@ -91,6 +143,7 @@ public class JSRuntime implements AutoCloseable {
      * Set the number of bytes that can be allocated.
      * Attempts to allocate more within this Runtime will throw an Exception
      * @param bytes the number of bytes that can be allocated in the runtime
+     * @throws IllegalStateException if the runtime has already started
      * @return this
      */
     public JSRuntime setMemoryLimit(int bytes) {
@@ -121,12 +174,34 @@ public class JSRuntime implements AutoCloseable {
      */
     public JSContext newContext() {
         getInstance();
-        JSContext ctx = new JSContext(this);
-        contexts.put(ctx.getPointer(), ctx);
-        return ctx;
+        try {
+            return doNow(new Task<JSContext>("create context") {
+                public void run() {
+                    JSContext ctx = new JSContext(JSRuntime.this);
+                    contexts.put(ctx.getPointer(), ctx);
+                    complete(ctx);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
-    JSContext getContext(long id) {
+    void closeContext(final JSContext ctx, Runnable callback) {
+        try {
+            doNow(new Task<Void>("close context") {
+                public void run() {
+                    callback.run();
+                    contexts.remove(ctx.getPointer());
+                    complete(null);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
+    }
+
+    private JSContext getContext(long id) {
         JSContext ctx = contexts.get(id);
         if (ctx == null) {
             throw new RuntimeException("Invalid Context: " + id);
@@ -152,13 +227,23 @@ public class JSRuntime implements AutoCloseable {
      * Closes the runtime and all associated contexts
      */
     @Override public void close() throws Exception {
-        if (pointer != 0) {
-            for (JSContext ctx : contexts.values()) {
-                ctx.close();
-            }
-            contexts.clear();
-            fnRuntimeClose();
-            pointer = 0;
+        if (!isClosed()) {
+            doNow(new Task<Void>("close runtime " + getPointer()) {
+                public void run() {
+                    if (!isClosed()) {
+                        try {
+                            for (JSContext ctx : contexts.values()) {
+                                ctx.close();
+                            }
+                        } catch (Exception e) {}
+                        contexts.clear();
+                        fnRuntimeClose();
+                        getTaskManager().remove(JSRuntime.this);
+                        pointer = 0;
+                        complete(null);
+                    }
+                }
+            }).get();
         }
     }
 
@@ -213,51 +298,68 @@ public class JSRuntime implements AutoCloseable {
 
     Instance getInstance() {
         if (instance == null) {
-            WasiOptions.Builder optionsBuilder = WasiOptions.builder();
-            if (stdout != null) {
-                optionsBuilder = optionsBuilder.withStdout(stdout);
-            }
-            if (stderr != null) {
-                optionsBuilder = optionsBuilder.withStderr(stderr);
-            }
-            if (stdin != null) {
-                optionsBuilder = optionsBuilder.withStdin(stdin);
-            }
-            WasiOptions options = optionsBuilder.build();
-            WasiPreview1 wasi = WasiPreview1.builder().withOptions(options).build();
-            Store store = new Store().addFunction(wasi.toHostFunctions()).addFunction(new HostFunction[] {
+            doLater(new Task<Void>("create instance") {
+                public void run() {
+                    WasiOptions.Builder optionsBuilder = WasiOptions.builder();
+                    if (stdout != null) {
+                        optionsBuilder = optionsBuilder.withStdout(stdout);
+                    }
+                    if (stderr != null) {
+                        optionsBuilder = optionsBuilder.withStderr(stderr);
+                    }
+                    if (stdin != null) {
+                        optionsBuilder = optionsBuilder.withStdin(stdin);
+                    }
+                    optionsBuilder = optionsBuilder.withEnvironment("RUST_BACKTRACE", "full");
+                    WasiOptions options = optionsBuilder.build();
+                    WasiPreview1 wasi = WasiPreview1.builder().withOptions(options).build();
+                    Store store = new Store().addFunction(wasi.toHostFunctions()).addFunction(new HostFunction[] {
 
-                createHostFunction("env", "call_java_function", List.of(ValType.I32, ValType.I32, ValType.I32, ValType.I32), List.of(ValType.I64),
-                    (Instance instance, long... args) -> { return new long[] { fnCallJavaFunction((int)args[0], (int)args[1], (int)args[2], (int)args[3]) }; }),
+                        createHostFunction("env", "call_java_function", List.of(ValType.I32, ValType.I32, ValType.I32, ValType.I32), List.of(ValType.I64),
+                            (Instance instance, long... args) -> { return new long[] { fnCallJavaFunction((int)args[0], (int)args[1], (int)args[2], (int)args[3]) }; }),
 
-                createHostFunction("env", "log_java", List.of(ValType.I32, ValType.I32, ValType.I32), List.of(),
-                    (Instance instance, long... args) -> { fnLog((int)args[0], (int)args[1], (int)args[2]); return new long[0]; }),
+                        createHostFunction("env", "log_java", List.of(ValType.I32, ValType.I32, ValType.I32), List.of(),
+                            (Instance instance, long... args) -> { fnLog((int)args[0], (int)args[1], (int)args[2]); return new long[0]; }),
 
-                createHostFunction("env", "js_interrupt_handler", List.of(), List.of(ValType.I32),
-                    (Instance instance, long... args) -> { return new long[] { fnInterruptHandler() }; }),
+                        createHostFunction("env", "js_interrupt_handler", List.of(), List.of(ValType.I32),
+                            (Instance instance, long... args) -> { return new long[] { fnInterruptHandler() }; }),
 
-                createHostFunction("env", "create_completable_future", List.of(ValType.I64, ValType.I64), List.of(ValType.I64),
-                    (Instance instance, long... args) -> { return new long[] { fnCreateCompletableFuture(args[0], args[1]) }; }),
+                        createHostFunction("env", "create_completable_future", List.of(ValType.I64, ValType.I64), List.of(ValType.I64),
+                            (Instance instance, long... args) -> { return new long[] { fnCreateCompletableFuture(args[0], args[1]) }; }),
 
-                createHostFunction("env", "complete_completable_future", List.of(ValType.I64, ValType.I32, ValType.I32, ValType.I32, ValType.I32), List.of(ValType.I64),
-                    (Instance instance, long... args) -> { fnCompleteCompletableFuture(args[0], (int)args[1], (int)args[2], (int)args[3], (int)args[4]); return new long[] { 0 }; }),
+                        createHostFunction("env", "complete_completable_future", List.of(ValType.I64, ValType.I32, ValType.I32, ValType.I32, ValType.I32), List.of(ValType.I64),
+                            (Instance instance, long... args) -> { fnCompleteCompletableFuture(args[0], (int)args[1], (int)args[2], (int)args[3], (int)args[4]); return new long[] { 0 }; }),
 
-                createHostFunction("env", "handle_rejected_promise", List.of(ValType.I64, ValType.I64, ValType.I32, ValType.I32, ValType.I32), List.of(),
-                    (Instance instance, long... args) -> { fnHandleRejectedPromise(args[0], args[1], (int)args[2], (int)args[3], args[4] != 0); return new long[] { 0 }; })
+                        createHostFunction("env", "handle_rejected_promise", List.of(ValType.I64, ValType.I64, ValType.I32, ValType.I32, ValType.I32), List.of(),
+                            (Instance instance, long... args) -> { fnHandleRejectedPromise(args[0], args[1], (int)args[2], (int)args[3], args[4] != 0); return new long[] { 0 }; })
 
-            });
-            WasmModule module = WasmLib.load();
-            instance = Instance.builder(module).withImportValues(store.toImportValues()).withMachineFactory(WasmLib::create).build();
-            this.pointer = fnRuntimeCreate();
+                    });
+                    WasmModule module = WasmLib.load();
+                    instance = Instance.builder(module).withImportValues(store.toImportValues()).withMachineFactory(WasmLib::create).build();
+                    // instance = Instance.builder(module).withImportValues(store.toImportValues()).build();
+                    pointer = fnRuntimeCreate();
 
-            int level;
-            for (level=JSLogger.ERROR;level<=JSLogger.TRACE && getLogger().isLoggable(level);level++);
-            fnRuntimeInitLogger(Math.min(level, JSLogger.TRACE));
-            if (memoryLimit > 0) {
-                fnRuntimeSetMemoryLimit(memoryLimit);
-            }
+                    int level;
+                    for (level=JSLogger.ERROR;level<=JSLogger.TRACE && getLogger().isLoggable(level);level++);
+                    fnRuntimeInitLogger(Math.min(level, JSLogger.TRACE));
+                    if (memoryLimit > 0) {
+                        fnRuntimeSetMemoryLimit(memoryLimit);
+                    }
+                    complete(null);
+                }
+            }).join();
         }
         return instance;
+    }
+
+    <T> Task<T>  doNow(Task<T>  task) {
+        task.setRuntime(this);
+        return getTaskManager().doNow(task);
+    }
+
+    <T> Task<T>  doLater(Task<T>  task) {
+        task.setRuntime(this);
+        return getTaskManager().doLater(task);
     }
 
     //--------------------------------------------------------------------------------------
@@ -275,34 +377,34 @@ public class JSRuntime implements AutoCloseable {
         return (int) (ptrlen & 0xffffffff);
     }
 
-    long store(byte[] data) {
+    private long store(byte[] data) {
         int ptr = alloc(data.length);
         getInstance().memory().write(ptr, data);
         return ptrlen(ptr, data.length);
     }
 
-    byte[] fetch(int ptr, int len) {
+    private byte[] fetch(int ptr, int len) {
         return getInstance().memory().readBytes(ptr, len);
     }
 
-    byte[] fetch(long ptrlen) {
+    private byte[] fetch(long ptrlen) {
         return fetch(ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
     }
 
-    int alloc(int size) {
+    private int alloc(int size) {
         long[] ptr = call("alloc", size);
         return (int)ptr[0];
     }
 
-    void dealloc(long ptrlen) {
+    private void dealloc(long ptrlen) {
         dealloc(ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
     }
 
-    void dealloc(int ptr, int len) {
+    private void dealloc(int ptr, int len) {
         call("dealloc", ptr, len);
     }
 
-    long[] call(String name, long... args) {
+    private long[] call(String name, long... args) {
         ExportFunction func = getInstance().export(name);
         try {
             long[] result = func.apply(args);
@@ -397,7 +499,7 @@ public class JSRuntime implements AutoCloseable {
         }
         if (reject != 0) {
             if (!(result instanceof Exception)) { // What could it be?
-                result = new JSException("Promise rejected", null);
+                result = new JSException("Promise rejected", result.toString());
             }
             future.completeExceptionally((Exception)result);
         } else {
@@ -422,7 +524,7 @@ public class JSRuntime implements AutoCloseable {
         JSPromise promise = ctx.newPromise(promisePtr);
         byte[] data = fetch(ptr, len);
         dealloc(ptr, len);
-        ctx.handleRejectedPromise(data, isHandled);
+        ctx.notifyUnhandledRejectedPromise(data, isHandled);
     }
 
 
@@ -436,7 +538,9 @@ public class JSRuntime implements AutoCloseable {
     }
 
     private void fnRuntimeClose() {
-        call("close_runtime_wasm", getPointer());
+        if (!isClosed()) {
+            call("close_runtime_wasm", getPointer());
+        }
     }
 
     private void fnRuntimeSetMemoryLimit(int bytes) {
@@ -455,78 +559,109 @@ public class JSRuntime implements AutoCloseable {
      * Create a context
      */
     long fnContextCreate() {
-        long[] r = call("create_context_wasm", getPointer());
-        if (r[0] == 0) {
-            throw new IllegalStateException("Context creation failed");
+        try {
+            return doNow(new Task<Long>("fnContextCreate") {
+                public void run() {
+                    long[] r = call("create_context_wasm", getPointer());
+                    if (r[0] == 0) {
+                        throw new IllegalStateException("Context creation failed");
+                    }
+                    complete(r[0]);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
         }
-        return r[0];
     }
 
     /**
      * Return the Globals object for this context
      */
     byte[] fnGlobals(JSContext ctx) {
-        long[] r = call("globals_wasm", ctx.getPointer());
-        long ptrlen = r[0];
-        byte[] data = fetch(ptrlen);
-        dealloc(ptrlen);
-        return data;
+        try {
+            return doNow(new Task<byte[]>("fnGlobals") {
+                public void run() {
+                    long[] r = call("globals_wasm", ctx.getPointer());
+                    long ptrlen = r[0];
+                    byte[] data = fetch(ptrlen);
+                    dealloc(ptrlen);
+                    complete(data);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     /**
      * Close a context
      */
     void fnContextClose(JSContext ctx) {
-        call("close_context_wasm", getPointer(), ctx.getPointer());
+        try {
+            doNow(new Task<Void>("fnContextClose") {
+                public void run() {
+                    if (!ctx.isClosed()) {
+                        call("close_context_wasm", getPointer(), ctx.getPointer());
+                    }
+                    complete(null);
+                }
+            });
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
-    byte[] fnEvalScript(JSContext ctx, String script) {
-        long ptrlen = store(script.getBytes(StandardCharsets.UTF_8));
-        scriptStart = System.currentTimeMillis();
-        long[] r = call("eval_script_wasm", ctx.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
-        scriptStart = 0;
-        dealloc(ptrlen);
-        ptrlen = r[0];
-        byte[] data = fetch(ptrlen);
-        dealloc(ptrlen);
-        return data;
+    byte[] fnEvalScript(final JSContext ctx, final String script) {
+        try {
+            return doNow(new Task<byte[]>("fnEval") {
+                public void run() {
+                    long ptrlen = store(script.getBytes(StandardCharsets.UTF_8));
+                    scriptStart = System.currentTimeMillis();
+                    long[] r = call("eval_script_wasm", ctx.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
+                    scriptStart = 0;
+                    dealloc(ptrlen);
+                    ptrlen = r[0];
+                    byte[] data = fetch(ptrlen);
+                    dealloc(ptrlen);
+                    complete(data);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
-    byte[] fnEvalScriptAsync(JSContext ctx, String script) {
-        long ptrlen = store(script.getBytes(StandardCharsets.UTF_8));
-        long[] r = call("eval_script_async_wasm", ctx.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
-        dealloc(ptrlen);
-        ptrlen = r[0];
-        byte[] data = fetch(ptrlen);
-        dealloc(ptrlen);
-        return data;
-    }
-
-    /**
-     * Invoke a function
-     * @param key the key
-     * @param value the serialized list of arguments
-     * @return the response
-     */
-    byte[] fnInvoke(JSContext ctx, String key, byte[] value) {
-        long kptrlen = store(key.getBytes(StandardCharsets.UTF_8));
-        long vptrlen = store(value);
-        scriptStart = System.currentTimeMillis();
-        long[] r = call("invoke_wasm", ctx.getPointer(), ptrlen2ptr(kptrlen), ptrlen2len(kptrlen), ptrlen2ptr(vptrlen), ptrlen2len(vptrlen));
-        scriptStart = 0;
-        dealloc(kptrlen);
-        dealloc(vptrlen);
-        long ptrlen = r[0];
-        byte[] data = fetch(ptrlen);
-        dealloc(ptrlen);
-        return data;
+    byte[] fnEvalScriptAsync(final JSContext ctx, final String script) {
+        try {
+            return doNow(new Task<byte[]>("fnEvalAsync") {
+                public void run() {
+                    long ptrlen = store(script.getBytes(StandardCharsets.UTF_8));
+                    long[] r = call("eval_script_async_wasm", ctx.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
+                    dealloc(ptrlen);
+                    ptrlen = r[0];
+                    byte[] data = fetch(ptrlen);
+                    dealloc(ptrlen);
+                    complete(data);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     /**
      * Return true if more tasks await
      */
-    boolean fnPoll(JSContext ctx) {
-        return call("poll_wasm", ctx.getPointer())[0] == 1;
+    boolean fnPoll(final JSContext ctx) {
+        try {
+            return doNow(new Task<Boolean>("fnPoll") {
+                public void run() {
+                    complete(call("poll_wasm", ctx.getPointer())[0] == 1);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     //-------------------------------------------------------------------------
@@ -537,76 +672,137 @@ public class JSRuntime implements AutoCloseable {
     /**
      * Create an object
      */
-    long fnObjectCreate(JSContext ctx) {
-        long[] r = call("object_create_wasm", ctx.getPointer());
-        if (r[0] == 0) {
-            throw new IllegalStateException("Object creation failed");
+    long fnObjectCreate(final JSContext ctx) {
+        try {
+            return doNow(new Task<Long>("fnObjectCreate") {
+                public void run() {
+                    long[] r = call("object_create_wasm", ctx.getPointer());
+                    if (r[0] == 0) {
+                        throw new IllegalStateException("Object creation failed");
+                    }
+                    complete(r[0]);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
         }
-        return r[0];
     }
 
     /**
      * Close an object
      */
-    void fnObjectClose(JSObject object) {
-        final JSContext ctx = object.getContext();
-        call("object_close_wasm", ctx.getPointer(), object.getPointer());
+    void fnObjectClose(final JSObject object) {
+        try {
+            doNow(new Task<Void>("fnObjectSize") {
+                public void run() {
+                    if (!object.isClosed()) {
+                        final JSContext ctx = object.getContext();
+                        call("object_close_wasm", ctx.getPointer(), object.getPointer());
+                    }
+                    complete(null);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     /**
      * Return the size of a JSObject
      */
     int fnObjectSize(final JSObject object) {
-        final JSContext ctx = object.getContext();
-        return (int)call("object_size_wasm", ctx.getPointer(), object.getPointer())[0];
+        try {
+            return doNow(new Task<Integer>("fnObjectSize") {
+                public void run() {
+                    final JSContext ctx = object.getContext();
+                    complete((int)call("object_size_wasm", ctx.getPointer(), object.getPointer())[0]);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     /**
      * Put a value on an object
      */
-    void fnObjectPut(JSObject object, byte[] key, byte[] value) {
-        final JSContext ctx = object.getContext();
-        long kptrlen = store(key);
-        long vptrlen = store(value);
-        call("object_set_value_wasm", ctx.getPointer(), object.getPointer(), ptrlen2ptr(kptrlen), ptrlen2len(kptrlen), ptrlen2ptr(vptrlen), ptrlen2len(vptrlen));
-        dealloc(kptrlen);
-        dealloc(vptrlen);
+    void fnObjectPut(final JSObject object, final byte[] key, final byte[] value) {
+        try {
+            doNow(new Task<Void>("fnObjectPut") {
+                public void run() {
+                    final JSContext ctx = object.getContext();
+                    long kptrlen = store(key);
+                    long vptrlen = store(value);
+                    call("object_set_value_wasm", ctx.getPointer(), object.getPointer(), ptrlen2ptr(kptrlen), ptrlen2len(kptrlen), ptrlen2ptr(vptrlen), ptrlen2len(vptrlen));
+                    dealloc(kptrlen);
+                    dealloc(vptrlen);
+                    complete(null);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     /**
      * Get a value from an object
      */
-    byte[] fnObjectGet(JSObject object, byte[] key) {
-        final JSContext ctx = object.getContext();
-        long ptrlen = store(key);
-        long[] r = call("object_get_value_wasm", ctx.getPointer(), object.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
-        dealloc(ptrlen);
-        ptrlen = r[0];
-        byte[] data = fetch(ptrlen);
-        dealloc(ptrlen);
-        return data;
+    byte[] fnObjectGet(final JSObject object, final byte[] key) {
+        try {
+            return doNow(new Task<byte[]>("fnObjectGet") {
+                public void run() {
+                    final JSContext ctx = object.getContext();
+                    long ptrlen = store(key);
+                    long[] r = call("object_get_value_wasm", ctx.getPointer(), object.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
+                    dealloc(ptrlen);
+                    ptrlen = r[0];
+                    byte[] data = fetch(ptrlen);
+                    dealloc(ptrlen);
+                    complete(data);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     /**
      * Remove a value from an object
      */
-    void fnObjectRemove(JSObject object, byte[] key) {
-        final JSContext ctx = object.getContext();
-        long ptrlen = store(key);
-        call("object_remove_value_wasm", ctx.getPointer(), object.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
-        dealloc(ptrlen);
+    void fnObjectRemove(final JSObject object, final byte[] key) {
+        try {
+            doNow(new Task<Void>("fnObjectKeySet") {
+                public void run() {
+                    final JSContext ctx = object.getContext();
+                    long ptrlen = store(key);
+                    call("object_remove_value_wasm", ctx.getPointer(), object.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
+                    dealloc(ptrlen);
+                    complete(null);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     /**
      * Get a list of keys from an object
      */
     byte[] fnObjectKeySet(JSObject object) {
-        final JSContext ctx = object.getContext();
-        long[] r = call("object_key_set_wasm", ctx.getPointer(), object.getPointer());
-        long ptrlen = r[0];
-        byte[] data = fetch(ptrlen);
-        dealloc(ptrlen);
-        return data;
+        try {
+            return doNow(new Task<byte[]>("fnObjectKeySet") {
+                public void run() {
+                    final JSContext ctx = object.getContext();
+                    long[] r = call("object_key_set_wasm", ctx.getPointer(), object.getPointer());
+                    long ptrlen = r[0];
+                    byte[] data = fetch(ptrlen);
+                    dealloc(ptrlen);
+                    complete(data);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     /**
@@ -616,11 +812,20 @@ public class JSRuntime implements AutoCloseable {
      * @param getter the index to the setter funtion (may be zero)
      * @param flags a bitmask: 0x01 = property is enumerable, 0x02 = property is deletable
      */
-    void fnObjectDefineProperty(JSObject object, byte[] key, int getter, int setter, int flags) {
-        final JSContext ctx = object.getContext();
-        long ptrlen = store(key);
-        long[] r = call("object_define_property_get_set_wasm", ctx.getPointer(), object.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen), getter, setter, flags);
-        dealloc(ptrlen);
+    void fnObjectDefineProperty(final JSObject object, final byte[] key, final int getter, final int setter, final int flags) {
+        try {
+            doNow(new Task<Void>("fnObjectDefineProperty") {
+                public void run() {
+                    final JSContext ctx = object.getContext();
+                    long ptrlen = store(key);
+                    long[] r = call("object_define_property_get_set_wasm", ctx.getPointer(), object.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen), getter, setter, flags);
+                    dealloc(ptrlen);
+                    complete(null);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     //-------------------------------------------------------------------------
@@ -630,68 +835,136 @@ public class JSRuntime implements AutoCloseable {
     /**
      * Create an array
      */
-    long fnArrayCreate(JSContext ctx) {
-        long[] r = call("array_create_wasm", ctx.getPointer());
-        if (r[0] == 0) {
-            throw new IllegalStateException("Array creation failed");
+    long fnArrayCreate(final JSContext ctx) {
+        try {
+            return doNow(new Task<Long>("fnArrayCreate") {
+                public void run() {
+                    long[] r = call("array_create_wasm", ctx.getPointer());
+                    if (r[0] == 0) {
+                        throw new IllegalStateException("Array creation failed");
+                    }
+                    complete(r[0]);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
         }
-        return r[0];
     }
 
     /**
      * Return the size of the array
      */
-    int fnArraySize(JSArray array) {
-        final JSContext ctx = array.getContext();
-        return (int)call("array_size_wasm", ctx.getPointer(), array.getPointer())[0];
+    int fnArraySize(final JSArray array) {
+        try {
+            return doNow(new Task<Integer>("fnArraySize") {
+                public void run() {
+                    final JSContext ctx = array.getContext();
+                    complete((int)call("array_size_wasm", ctx.getPointer(), array.getPointer())[0]);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     /**
      * Insert an item in the array
      */
     void fnArrayAdd(JSArray array, int ix, byte[] value) {
-        final JSContext ctx = array.getContext();
-        long ptrlen = store(value);
-        call("array_add_wasm", ctx.getPointer(), array.getPointer(), ix, ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
-        dealloc(ptrlen);
+        try {
+            doNow(new Task<byte[]>("fnArrayAdd") {
+                public void run() {
+                    final JSContext ctx = array.getContext();
+                    long ptrlen = store(value);
+                    call("array_add_wasm", ctx.getPointer(), array.getPointer(), ix, ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
+                    dealloc(ptrlen);
+                    complete(null);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     /**
      * Set an item in the array
      */
-    void fnArraySet(JSArray array, int ix, byte[] value) {
-        final JSContext ctx = array.getContext();
-        long ptrlen = store(value);
-        call("array_set_wasm", ctx.getPointer(), array.getPointer(), ix, ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
-        dealloc(ptrlen);
+    void fnArraySet(final JSArray array, final int ix, final byte[] value) {
+        try {
+            doNow(new Task<byte[]>("fnArraySet") {
+                public void run() {
+                    final JSContext ctx = array.getContext();
+                    long ptrlen = store(value);
+                    call("array_set_wasm", ctx.getPointer(), array.getPointer(), ix, ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
+                    dealloc(ptrlen);
+                    complete(null);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     /**
      * Get an item from the array
      */
-    byte[] fnArrayGet(JSArray array, int ix) {
-        final JSContext ctx = array.getContext();
-        long[] r = call("array_get_wasm", ctx.getPointer(), array.getPointer(), ix);
-        long ptrlen = r[0];
-        byte[] data = fetch(ptrlen);
-        dealloc(ptrlen);
-        return data;
+    byte[] fnArrayGet(final JSArray array, final int ix) {
+        try {
+            return doNow(new Task<byte[]>("fnArrayGet") {
+                public void run() {
+                    if (array.isClosed()) {
+                        throw new IllegalStateException("Array closed");
+                    }
+                    final JSContext ctx = array.getContext();
+                    long[] r = call("array_get_wasm", ctx.getPointer(), array.getPointer(), ix);
+                    long ptrlen = r[0];
+                    byte[] data = fetch(ptrlen);
+                    dealloc(ptrlen);
+                    complete(data);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     /**
      * Remove an item from the array
      */
-    void fnArrayRemove(JSArray array, int ix) {
-        final JSContext ctx = array.getContext();
-        call("array_remove_wasm", ctx.getPointer(), array.getPointer(), ix);
+    void fnArrayRemove(final JSArray array, final int ix) {
+        try {
+            doNow(new Task<Void>("fnArrayRemove") {
+                public void run() {
+                    if (array.isClosed()) {
+                        throw new IllegalStateException("Array closed");
+                    }
+                    final JSContext ctx = array.getContext();
+                    call("array_remove_wasm", ctx.getPointer(), array.getPointer(), ix);
+                    complete(null);
+                }
+            });
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     /**
      * Free an array
      */
-    void fnArrayClose(JSArray array) {
-        final JSContext ctx = array.getContext();
-        call("array_close_wasm", ctx.getPointer(), array.getPointer());
+    void fnArrayClose(final JSArray array) {
+        try {
+            doNow(new Task<Void>("fnArrayClose") {
+                public void run() {
+                    if (!array.isClosed()) {
+                        final JSContext ctx = array.getContext();
+                        call("array_close_wasm", ctx.getPointer(), array.getPointer());
+                    }
+                    complete(null);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     //-------------------------------------------------------------------------
@@ -701,49 +974,93 @@ public class JSRuntime implements AutoCloseable {
     /**
      * Invoke a function
      */
-    byte[] fnFunctionCall(JSFunction function, byte[] data) {
-        final JSContext ctx = function.getContext();
-        long ptrlen = store(data);
-        scriptStart = System.currentTimeMillis();
-        long[] r = call("call_function_wasm", ctx.getPointer(), function.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
-        scriptStart = 0;
-        dealloc(ptrlen);
-        ptrlen = r[0];
-        data = fetch(ptrlen);
-        dealloc(ptrlen);
-        return data;
+    byte[] fnFunctionCall(final JSFunction function, final byte[] data) {
+        try {
+            return doNow(new Task<byte[]>("fnFunctionCall") {
+                public void run() {
+                    if (function.isClosed()) {
+                        throw new IllegalStateException("Function closed");
+                    }
+                    final JSContext ctx = function.getContext();
+                    long ptrlen = store(data);
+                    scriptStart = System.currentTimeMillis();
+                    long[] r = call("call_function_wasm", ctx.getPointer(), function.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
+                    scriptStart = 0;
+                    dealloc(ptrlen);
+                    ptrlen = r[0];
+                    byte[] data = fetch(ptrlen);
+                    dealloc(ptrlen);
+                    complete(data);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     /**
      * Invoke a function as a constructor
      */
-    byte[] fnFunctionConstruct(JSFunction function, byte[] data) {
-        final JSContext ctx = function.getContext();
-        long ptrlen = store(data);
-        scriptStart = System.currentTimeMillis();
-        long[] r = call("construct_function_wasm", ctx.getPointer(), function.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
-        scriptStart = 0;
-        dealloc(ptrlen);
-        ptrlen = r[0];
-        data = fetch(ptrlen);
-        dealloc(ptrlen);
-        return data;
+    byte[] fnFunctionConstruct(final JSFunction function, final byte[] data) {
+        try {
+            return doNow(new Task<byte[]>("fnFunctionConstruct") {
+                public void run() {
+                    if (function.isClosed()) {
+                        throw new IllegalStateException("Function closed");
+                    }
+                    final JSContext ctx = function.getContext();
+                    long ptrlen = store(data);
+                    scriptStart = System.currentTimeMillis();
+                    long[] r = call("construct_function_wasm", ctx.getPointer(), function.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
+                    scriptStart = 0;
+                    dealloc(ptrlen);
+                    ptrlen = r[0];
+                    byte[] data = fetch(ptrlen);
+                    dealloc(ptrlen);
+                    complete(data);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     /**
      * Return true if this function is a constructor function
      */
-    boolean fnFunctionIsConstructor(JSFunction function) {
-        final JSContext ctx = function.getContext();
-        return call("function_is_constructor_wasm", ctx.getPointer(), function.getPointer())[0] == 1;
+    boolean fnFunctionIsConstructor(final JSFunction function) {
+        try {
+            return doNow(new Task<Boolean>("fnFunctionClose") {
+                public void run() {
+                    if (function.isClosed()) {
+                        throw new IllegalStateException("Function closed");
+                    }
+                    final JSContext ctx = function.getContext();
+                    complete(call("function_is_constructor_wasm", ctx.getPointer(), function.getPointer())[0] == 1);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     /**
      * Free a function
      */
-    void fnFunctionClose(JSFunction function) {
-        final JSContext ctx = function.getContext();
-        call("close_function_wasm", ctx.getPointer(), function.getPointer());
+    void fnFunctionClose(final JSFunction function) {
+        try {
+            doNow(new Task<Void>("fnFunctionClose") {
+                public void run() {
+                    if (!function.isClosed()) {
+                        final JSContext ctx = function.getContext();
+                        call("close_function_wasm", ctx.getPointer(), function.getPointer());
+                    }
+                    complete(null);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     //-------------------------------------------------------------------------
@@ -753,46 +1070,93 @@ public class JSRuntime implements AutoCloseable {
     /**
      * Create a promise
      */
-    long fnPromiseCreate(JSContext ctx, int index) {
-        long[] r = call("promise_create_wasm", ctx.getPointer(), index);
-        if (r[0] == 0) {
-            throw new IllegalStateException("Promise creation failed");
+    long fnPromiseCreate(final JSContext ctx, final int index) {
+        try {
+            return doNow(new Task<Long>("fnPromiseCreate") {
+                public void run() {
+                    if (ctx.isClosed()) {
+                        throw new IllegalStateException("Context closed");
+                    }
+                    long[] r = call("promise_create_wasm", ctx.getPointer(), index);
+                    if (r[0] == 0) {
+                        completeExceptionally(new IllegalStateException("Promise creation failed"));
+                    } else {
+                        complete(r[0]);
+                    }
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
         }
-        return r[0];
     }
 
     /**
      * Resolve a promise
      */
-    void fnPromiseResolve(JSPromise promise, byte[] data) {
-        final JSContext ctx = promise.getContext();
-        long ptrlen = store(data);
-        scriptStart = System.currentTimeMillis();
-        long[] r = call("promise_resolve_wasm", ctx.getPointer(), promise.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
-        scriptStart = 0;
-        dealloc(ptrlen);
-        ptrlen = r[0];
+    void fnPromiseResolve(final JSPromise promise, final byte[] data) {
+        try {
+            doNow(new Task<Void>("fnPromiseResolve") {
+                public void run() {
+                    if (promise.isClosed()) {
+                        throw new IllegalStateException("Promise closed");
+                    }
+                    final JSContext ctx = promise.getContext();
+                    long ptrlen = store(data);
+                    scriptStart = System.currentTimeMillis();
+                    long[] r = call("promise_resolve_wasm", ctx.getPointer(), promise.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
+                    scriptStart = 0;
+                    dealloc(ptrlen);
+                    ptrlen = r[0];
+                    complete(null);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     /**
      * Reject a promise
      */
-    void fnPromiseReject(JSPromise promise, byte[] data) {
-        final JSContext ctx = promise.getContext();
-        long ptrlen = store(data);
-        scriptStart = System.currentTimeMillis();
-        long[] r = call("promise_reject_wasm", ctx.getPointer(), promise.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
-        scriptStart = 0;
-        dealloc(ptrlen);
-        ptrlen = r[0];
+    void fnPromiseReject(final JSPromise promise, final byte[] data) {
+        try {
+            doNow(new Task<Void>("fnPromiseReject") {
+                public void run() {
+                    if (promise.isClosed()) {
+                        throw new IllegalStateException("Promise closed");
+                    }
+                    final JSContext ctx = promise.getContext();
+                    long ptrlen = store(data);
+                    scriptStart = System.currentTimeMillis();
+                    long[] r = call("promise_reject_wasm", ctx.getPointer(), promise.getPointer(), ptrlen2ptr(ptrlen), ptrlen2len(ptrlen));
+                    scriptStart = 0;
+                    dealloc(ptrlen);
+                    ptrlen = r[0];
+                    complete(null);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
     /**
      * Free a Promise
      */
-    void fnPromiseClose(JSPromise promise) {
-        final JSContext ctx = promise.getContext();
-        call("promise_close_wasm", ctx.getPointer(), promise.getPointer());
+    void fnPromiseClose(final JSPromise promise) {
+        try {
+            doNow(new Task<Void>("fnPromiseClose") {
+                public void run() {
+                    if (!promise.isClosed()) {
+                        final JSContext ctx = promise.getContext();
+                        call("promise_close_wasm", ctx.getPointer(), promise.getPointer());
+                    }
+                    complete(null);
+                }
+            }).get();
+        } catch (Exception e) {
+            throw toRuntimeException(e);
+        }
     }
 
 }
