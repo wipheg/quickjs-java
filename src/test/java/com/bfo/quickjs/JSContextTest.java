@@ -26,7 +26,7 @@ import java.util.function.Supplier;
 public class JSContextTest {
 
     void debug(JSRuntime runtime, String msg, Object... args) {
-        runtime.getLogger().log(JSRuntime.Logger.DEBUG, msg, args);
+        runtime.getLogger().log(JSLogger.DEBUG, msg, args);
     }
 
     //----------------------------------------------------------------------------
@@ -932,7 +932,7 @@ public class JSContextTest {
                     new Thread(new Runnable() {
                         public void run() {
                             try { Thread.sleep(500); } catch (Exception e) {}
-                            runtime.getLogger().log(JSRuntime.Logger.DEBUG, "Completing future in background thread");
+                            runtime.getLogger().log(JSLogger.DEBUG, "Completing future in background thread");
                             future.complete("done");
                         }
                     }).start();
@@ -961,7 +961,7 @@ public class JSContextTest {
                     new Thread(new Runnable() {
                         public void run() {
                             try { Thread.sleep(500); } catch (Exception e) {}
-                            runtime.getLogger().log(JSRuntime.Logger.DEBUG, "Completing future in background thread");
+                            runtime.getLogger().log(JSLogger.DEBUG, "Completing future in background thread");
                             future.complete("done");
                         }
                     }).start();
@@ -991,7 +991,7 @@ public class JSContextTest {
                     new Thread(new Runnable() {
                         public void run() {
                             try { Thread.sleep(500); } catch (Exception e) {}
-                            runtime.getLogger().log(JSRuntime.Logger.DEBUG, "Completing future in background thread");
+                            runtime.getLogger().log(JSLogger.DEBUG, "Completing future in background thread");
                             future.complete("done");
                         }
                     }).start();
@@ -1025,7 +1025,7 @@ public class JSContextTest {
                     new Thread(new Runnable() {
                         public void run() {
                             try { Thread.sleep(500); } catch (Exception e) {}
-                            runtime.getLogger().log(JSRuntime.Logger.DEBUG, "Completing future in background thread");
+                            runtime.getLogger().log(JSLogger.DEBUG, "Completing future in background thread");
                             future.complete("done");
                         }
                     }).start();

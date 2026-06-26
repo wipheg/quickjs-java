@@ -7,7 +7,7 @@ import org.junit.jupiter.api.Test;
 public class TestHarness {
     public static void main(String[] args) throws Exception {
         for (int i=0;i<args.length;i++) {
-            JSRuntime.Logger logger = JSRuntime.Logger.toSystem(JSRuntime.class.getPackage().getName());
+            JSLogger logger = JSLogger.toSystem(JSRuntime.class.getPackage().getName());
             String s = args[i];
             Class c = Class.forName(TestHarness.class.getPackage().getName() + "." + s);
             Object o = null;

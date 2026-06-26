@@ -104,6 +104,15 @@ public class JSObject extends AbstractMap<String,Object> implements JSType, Auto
         return oldValue;
     }
 
+    @Override public Object get(Object key) {
+        if (!(key instanceof String)) {
+            return null;
+        }
+        byte[] b = ctx.pack(key);
+        Object value = ctx.unpack(ctx.getRuntime().fnObjectGet(JSObject.this, ctx.pack(key)));
+        return value;
+    }
+
     private void set(String key, Object value) {
         if (value instanceof JSComputedValue) {
             JSComputedValue cv = (JSComputedValue) value;

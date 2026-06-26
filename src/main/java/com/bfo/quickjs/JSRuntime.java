@@ -4,7 +4,6 @@ import java.util.*;
 import java.util.function.*;
 import java.util.concurrent.*;
 import java.io.*;
-import java.nio.*;
 import java.nio.charset.*;
 import com.dylibso.chicory.runtime.*;
 import com.dylibso.chicory.wasi.*;
@@ -21,125 +20,11 @@ public class JSRuntime implements AutoCloseable {
     private InputStream stdin;
     private OutputStream stdout, stderr;
     private final Map<Long,JSContext> contexts = new HashMap<>();
-    private Logger logger;
+    private JSLogger logger;
     private long pointer;                   // Pointer to the runtime in the wasm library.
     private long scriptRuntimeLimit;
     private long scriptStart;
     private int memoryLimit;
-
-    /** 
-     * A simple generic Logger interface, for extensible logging
-     */
-    public interface Logger {
-        public static final int TRACE = 5, DEBUG = 4, INFO = 3, WARN = 2, ERROR = 1;
-        /**
-         * Return true if the specified log level is loggable
-         */
-        public boolean isLoggable(int level);
-         /**
-          * Trivial logging interface which takes a Message string that may include "{}", one
-          * or more objects to insert into that message, and an optional final argument which
-          * is a Throwable. eg <code>log(INFO, "Ignoring exception from {}", source, exception);</code>
-          * @param level the level
-          * @param message the message template
-          * @param args the arguments to insert into the template, followed by an optional exception
-          */
-        public void log(int level, String message, Object... args);
-
-        /**
-         * Create a new Logger that logs to the specified Appendable
-         * @param maxlevel the logging level 
-         * @param out the Appendable
-         */
-        public static Logger toStream(final int maxlevel, final Appendable out) {
-            Writer w;
-            if (!(out instanceof Writer)) {
-                w = new Writer() {
-                    @Override public void close() throws IOException {
-                        if (out instanceof Closeable) {
-                            ((Closeable)out).close();
-                        }
-                    }
-                    @Override public void flush() {
-                    }
-                    @Override public void write(char[] buf, int off, int len) throws IOException {
-                        out.append(CharBuffer.wrap(buf, off, len));
-                    }
-                };
-            } else {
-                w = (Writer)out;
-            }
-            final PrintWriter pw = new PrintWriter(w);
-            return new Logger() {
-                @Override public boolean isLoggable(int level) {
-                    return level <= maxlevel;
-                }
-                @Override public void log(int level, String msg, Object... args) {
-                    if (isLoggable(level)) {
-                        Throwable e = null;
-                        if (args.length > 0 && args[args.length - 1] instanceof Throwable) {
-                            e = (Throwable)args[args.length - 1];
-                            args = Arrays.copyOf(args, args.length - 1);
-                        }
-                        StringBuilder sb = new StringBuilder();
-                        sb.append("# [");
-                        switch (level) {
-                            case 1: sb.append("error"); break;
-                            case 2: sb.append("warning"); break;
-                            case 3: sb.append("info"); break;
-                            case 4: sb.append("debug"); break;
-                            case 5: sb.append("trace"); break;
-                            default: sb.append("level" + level);
-                        }
-                        sb.append("]: ");
-                        sb.append(JSRuntime.format(msg, args));
-                        sb.append("\n");
-                        pw.append(sb);
-                        if (e != null) {
-                            e.printStackTrace(pw);
-                        }
-                    }
-                }
-            };
-        }
-
-        /**
-         * Create a logger that logs to the "com.bfo.quickjs" System.Logger
-         */
-        public static Logger toSystem() {
-            return toSystem(JSRuntime.class.getPackage().getName());
-        }
-        /**
-         * Create a logger that logs to the specified System.Logger
-         * @param name the logger name.
-         */
-        public static Logger toSystem(String name) {
-            final System.Logger logger = System.getLogger(name);
-            return new Logger() {
-                private static System.Logger.Level[] LEVELS = new System.Logger.Level[] {
-                    System.Logger.Level.OFF,
-                    System.Logger.Level.ERROR,
-                    System.Logger.Level.WARNING,
-                    System.Logger.Level.INFO,
-                    System.Logger.Level.DEBUG,
-                    System.Logger.Level.TRACE
-                };
-                @Override public boolean isLoggable(int level) {
-                    return logger.isLoggable(LEVELS[level]);
-                }
-                @Override public void log(int level, String msg, Object... args) {
-                    if (isLoggable(level)) {
-                        Throwable e = null;
-                        if (args.length > 0 && args[args.length - 1] instanceof Throwable) {
-                            e = (Throwable)args[args.length - 1];
-                            args = Arrays.copyOf(args, args.length - 1);
-                        }
-                        logger.log(LEVELS[level], JSRuntime.format(msg, args), e);
-                    }
-                }
-            };
-        }
-    }
 
     /**
      * Create a new JSRuntime
@@ -148,11 +33,11 @@ public class JSRuntime implements AutoCloseable {
     }
 
     /**
-     * Set the Logger
+     * Set the JSLogger
      * @param logger the logger, or null to use the default
      * @return this
      */
-    public JSRuntime setLogger(Logger logger) {
+    public JSRuntime setLogger(JSLogger logger) {
         if (instance != null) {
             throw new IllegalStateException("Already created");
         }
@@ -256,9 +141,9 @@ public class JSRuntime implements AutoCloseable {
     /**
      * Return the logger specified in the constructor
      */
-    public Logger getLogger() {
+    public JSLogger getLogger() {
         if (logger == null) {
-            logger = Logger.toSystem();
+            logger = JSLogger.toSystem();
         }
         return logger;
     }
@@ -314,13 +199,13 @@ public class JSRuntime implements AutoCloseable {
             try {
                 long[] result = func.apply(instance, args);
                 if (result == null) {
-                    getLogger().log(Logger.TRACE, "hear {}.{}{} = {}", set, name, args, result);
+                    getLogger().log(JSLogger.TRACE, "hear {}.{}{} = {}", set, name, args, result);
                 } else if (result.length == 1) {
-                    getLogger().log(Logger.TRACE, "hear {}.{}{} = {} ({} {})", set, name, args, result, ptrlen2ptr(result[0]), ptrlen2len(result[0]));
+                    getLogger().log(JSLogger.TRACE, "hear {}.{}{} = {} ({} {})", set, name, args, result, ptrlen2ptr(result[0]), ptrlen2len(result[0]));
                 }
                 return result;
             } catch (RuntimeException e) {
-                getLogger().log(Logger.TRACE, "hear {}.{}{} = ERROR", set, name, args, e);
+                getLogger().log(JSLogger.TRACE, "hear {}.{}{} = ERROR", set, name, args, e);
                 return null;
             }
         });
@@ -366,8 +251,8 @@ public class JSRuntime implements AutoCloseable {
             this.pointer = fnRuntimeCreate();
 
             int level;
-            for (level=Logger.ERROR;level<=Logger.TRACE && getLogger().isLoggable(level);level++);
-            fnRuntimeInitLogger(Math.min(level, Logger.TRACE));
+            for (level=JSLogger.ERROR;level<=JSLogger.TRACE && getLogger().isLoggable(level);level++);
+            fnRuntimeInitLogger(Math.min(level, JSLogger.TRACE));
             if (memoryLimit > 0) {
                 fnRuntimeSetMemoryLimit(memoryLimit);
             }
@@ -422,13 +307,13 @@ public class JSRuntime implements AutoCloseable {
         try {
             long[] result = func.apply(args);
             if (result == null) {
-                getLogger().log(Logger.TRACE, "call {}{} = {}", name, args, result);
+                getLogger().log(JSLogger.TRACE, "call {}{} = {}", name, args, result);
             } else if (result.length == 1) {
-                getLogger().log(Logger.TRACE, "call {}{} = {} ({} {})", name, args, result, ptrlen2ptr(result[0]), ptrlen2len(result[0]));
+                getLogger().log(JSLogger.TRACE, "call {}{} = {} ({} {})", name, args, result, ptrlen2ptr(result[0]), ptrlen2len(result[0]));
             }
             return result;
         } catch (RuntimeException e) {
-            getLogger().log(Logger.TRACE, "call {}{} = ERROR", name, args, e);
+            getLogger().log(JSLogger.TRACE, "call {}{} = ERROR", name, args, e);
             throw e;
         }
     }
@@ -474,7 +359,7 @@ public class JSRuntime implements AutoCloseable {
         if (scriptStart > 0 && scriptRuntimeLimit > 0) {
             long runtime = System.currentTimeMillis() - scriptStart;
             if (runtime > scriptRuntimeLimit) {
-                getLogger().log(Logger.WARN, "Runtime {}ms exceeds limit of {}ms: interrupting", runtime, scriptRuntimeLimit);
+                getLogger().log(JSLogger.WARN, "Runtime {}ms exceeds limit of {}ms: interrupting", runtime, scriptRuntimeLimit);
                 interrupt = true;
             }
         }
@@ -506,7 +391,7 @@ public class JSRuntime implements AutoCloseable {
         byte[] data = fetch(argPtr, argLen);
         dealloc(argPtr, argLen);
         Object result = ctx.unpack(data);
-        getLogger().log(Logger.DEBUG, "{} future with value {}", (reject == 1 ? "Rejecting" : "Resolving"), result);
+        getLogger().log(JSLogger.DEBUG, "{} future with value {}", (reject == 1 ? "Rejecting" : "Resolving"), result);
         if (future instanceof JSPromise) {
             ((JSPromise)future).notifyCompletedByJS();
         }
