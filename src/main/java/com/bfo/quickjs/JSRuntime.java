@@ -4,6 +4,7 @@ import java.util.*;
 import java.util.function.*;
 import java.util.concurrent.*;
 import java.io.*;
+import java.nio.*;
 import java.nio.charset.*;
 import com.dylibso.chicory.runtime.*;
 import com.dylibso.chicory.wasi.*;
@@ -14,7 +15,6 @@ import com.dylibso.chicory.wasm.WasmModule;
  * The JS Runtime may contain one or more JS Contexts. It is the entry point into the API
  */
 public class JSRuntime implements AutoCloseable {
-    
 
     private Instance instance;          // WASM instance
     private InputStream stdin;
@@ -247,7 +247,7 @@ public class JSRuntime implements AutoCloseable {
 
             });
             WasmModule module = WasmLib.load();
-            instance = Instance.builder(module).withImportValues(store.toImportValues()).withMachineFactory(WasmLib::create).build();
+            instance = Instance.builder(module).withImportValues(store.toImportValues()).withMemoryFactory(JSRuntimeMemory::new).withMachineFactory(WasmLib::create).build();
             this.pointer = fnRuntimeCreate();
 
             int level;
@@ -300,6 +300,57 @@ public class JSRuntime implements AutoCloseable {
 
     void dealloc(int ptr, int len) {
         call("dealloc", ptr, len);
+    }
+
+    static final class BufferAllocation implements AutoCloseable {
+        private final JSRuntime runtime;
+        private final int ptr;
+        private final int len;
+        private final ByteBuffer buffer;
+        private boolean closed;
+
+        BufferAllocation(JSRuntime runtime, int ptr, int len, ByteBuffer buffer) {
+            this.runtime = runtime;
+            this.ptr = ptr;
+            this.len = len;
+            this.buffer = buffer;
+        }
+
+        ByteBuffer buffer() {
+            return buffer;
+        }
+
+        @Override public void close() {
+            if (!closed) {
+                closed = true;
+                runtime.dealloc(ptr, len);
+            }
+        }
+    }
+
+    BufferAllocation newBuffer(int size) {
+        if (size < 0) {
+            throw new IllegalArgumentException("Invalid size");
+        }
+        int allocSize = Math.max(1, size);
+        int allocPtr = alloc(allocSize);
+        return new BufferAllocation(this, allocPtr, allocSize, bufferFromMemory(allocPtr, size));
+    }
+
+    ByteBuffer bufferFromMemory(int ptr, int len) {
+        return memory().buffer(ptr, len);
+    }
+
+    long bufferPtrLen(ByteBuffer buffer) {
+        return memory().ptrLen(buffer);
+    }
+
+    private JSRuntimeMemory memory() {
+        com.dylibso.chicory.runtime.Memory memory = getInstance().memory();
+        if (memory instanceof JSRuntimeMemory) {
+            return (JSRuntimeMemory)memory;
+        }
+        throw new IllegalStateException("Unsupported memory implementation");
     }
 
     long[] call(String name, long... args) {
@@ -692,6 +743,17 @@ public class JSRuntime implements AutoCloseable {
     void fnArrayClose(JSArray array) {
         final JSContext ctx = array.getContext();
         call("array_close_wasm", ctx.getPointer(), array.getPointer());
+    }
+
+    //-------------------------------------------------------------------------
+    // ArrayBuffer functions
+    //-------------------------------------------------------------------------
+
+    /**
+     * Free the persistent ArrayBuffer reference used to keep a JS-created buffer alive.
+     */
+    void fnArrayBufferClose(JSContext ctx, long pointer) {
+        call("array_buffer_close_wasm", ctx.getPointer(), pointer);
     }
 
     //-------------------------------------------------------------------------

@@ -3,6 +3,7 @@ package com.bfo.quickjs;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.*;
+import java.nio.*;
 import java.nio.charset.*;
 
 /**
@@ -145,6 +146,16 @@ public class JSContext extends AbstractMap<String,Object> implements AutoCloseab
         JSObject o = new JSObject(this, getRuntime().fnObjectCreate(this));
         closeables.add(o);
         return o;
+    }
+
+    /**
+     * Create a new {@link ByteBuffer} backed by the WebAssembly memory for this runtime.
+     * The buffer can be passed to JavaScript as an ArrayBuffer without copying.
+     */
+    public ByteBuffer newBuffer(int size) {
+        JSRuntime.BufferAllocation allocation = getRuntime().newBuffer(size);
+        closeables.add(allocation);
+        return allocation.buffer();
     }
 
     /**

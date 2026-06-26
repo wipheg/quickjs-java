@@ -1,6 +1,7 @@
 package com.bfo.quickjs;
 
 import java.io.*;
+import java.nio.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.*;
@@ -82,6 +83,13 @@ class Packer {
             } else if (o instanceof Integer) {
                 p.packString("int");
                 p.packInt(((Integer)o).intValue());
+            } else if (o instanceof ByteBuffer) {
+                p.packString("arrayBuffer");
+                long ptrlen = ctx.getRuntime().bufferPtrLen((ByteBuffer)o);
+                p.packArrayHeader(3);
+                p.packInt((int)(ptrlen >> 32));
+                p.packInt((int)ptrlen);
+                p.packLong(0);
             } else if (o instanceof JSArray) {
                 p.packString("nativeArray");
                 p.packLong(((JSArray)o).getPointer());
@@ -163,6 +171,26 @@ class Packer {
                     return u.unpackBoolean();
                 case "int":
                     return u.unpackInt();
+                case "arrayBuffer":
+                    size = u.unpackArrayHeader();
+                    if (size != 2 && size != 3) {
+                        throw new IOException("Expected arrayBuffer with 2 or 3 element (pointer, length, persistent pointer)");
+                    }
+                    pointer = u.unpackLong();
+                    long len = u.unpackLong();
+                    long persistentPointer = size == 3 ? u.unpackLong() : 0;
+                    if (pointer < 0 || pointer > Integer.MAX_VALUE || len < 0 || len > Integer.MAX_VALUE) {
+                        throw new IOException("Invalid arrayBuffer pointer/length");
+                    }
+                    ByteBuffer buffer = ctx.getRuntime().bufferFromMemory((int)pointer, (int)len);
+                    if (persistentPointer != 0) {
+                        ctx.addCloseable(new AutoCloseable() {
+                            @Override public void close() {
+                                ctx.getRuntime().fnArrayBufferClose(ctx, persistentPointer);
+                            }
+                        });
+                    }
+                    return buffer;
                 case "nativeArray":
                     return new JSArray(ctx, u.unpackLong());
                 case "nativeObject":

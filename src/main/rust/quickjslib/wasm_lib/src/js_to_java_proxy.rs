@@ -2,7 +2,9 @@ use log::debug;
 use log::error;
 use rquickjs::function::Args;
 use rquickjs::prelude::IntoArgs;
+use rquickjs::qjs;
 use rquickjs::Array;
+use rquickjs::ArrayBuffer;
 use rquickjs::Atom;
 use rquickjs::FromAtom;
 use rquickjs::FromJs;
@@ -11,10 +13,12 @@ use rquickjs::IntoAtom;
 use rquickjs::IntoJs;
 use rquickjs::Object;
 use rquickjs::Persistent;
+use rquickjs::Context;
 use rquickjs::Value;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
+use wasm_macros::wasm_export;
 
 use crate::completable_future;
 use crate::completable_future::convert_promise;
@@ -32,6 +36,8 @@ pub enum JSJavaProxy {
     Int(i32),
     Float(f64),
     Boolean(bool),
+    /// Fields: buffer pointer, buffer length, persistent ArrayBuffer pointer
+    ArrayBuffer(u64, usize, u64),
     /// Fields: Vec of JSJavaProxy
     Array(Vec<JSJavaProxy>),
     /// Fields: Array Pointer
@@ -47,6 +53,15 @@ pub enum JSJavaProxy {
     Exception(String, String),
     /// Fields: Pointer to java completable future, Pointer to native promise
     CompletableFuture(i32, u64),
+}
+
+#[wasm_export]
+pub fn array_buffer_close(
+    _context: &Context,
+    array_buffer: Box<Persistent<ArrayBuffer<'static>>>,
+) -> bool {
+    drop(array_buffer);
+    true
 }
 
 impl<'js> FromJs<'js> for JSJavaProxy {
@@ -87,6 +102,23 @@ impl<'js> IntoJs<'js> for JSJavaProxy {
                 ctx.clone(),
                 value.as_str(),
             )?)),
+            JSJavaProxy::ArrayBuffer(ptr, len, _persistent_ptr) => {
+                let value = unsafe {
+                    qjs::JS_NewArrayBuffer(
+                        ctx.as_raw().as_ptr(),
+                        ptr as *mut u8,
+                        len as _,
+                        None,
+                        0 as _,
+                        false,
+                    )
+                };
+                if unsafe { qjs::JS_IsException(value) } {
+                    Err(rquickjs::Error::Exception)
+                } else {
+                    Ok(unsafe { Value::from_raw(ctx.clone(), value) })
+                }
+            }
             JSJavaProxy::Array(values) => {
                 let array = rquickjs::Array::new(ctx.clone())?;
                 for (i, value) in values.into_iter().enumerate() {
@@ -183,6 +215,17 @@ impl JSJavaProxy {
         } else if value.is_promise() {
             let promise = value.into_promise().unwrap();
             return convert_promise(promise);
+        } else if let Some(array_buffer) = ArrayBuffer::from_value(value.clone()) {
+            let raw = array_buffer.as_raw().ok_or(rquickjs::Error::Unknown)?;
+            let ctx = array_buffer.ctx().clone();
+            let persistent_array_buffer = Persistent::save(&ctx, array_buffer);
+            let persistent_array_buffer_ptr =
+                Box::into_raw(Box::new(persistent_array_buffer)) as u64;
+            return Ok(JSJavaProxy::ArrayBuffer(
+                raw.ptr.as_ptr() as u64,
+                raw.len,
+                persistent_array_buffer_ptr,
+            ));
         } else if value.is_function() {
             let function = value.into_function().unwrap();
             let ctx = function.ctx().clone();
