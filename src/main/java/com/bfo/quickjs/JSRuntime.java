@@ -146,6 +146,9 @@ public class JSRuntime implements AutoCloseable {
      * @param resolver the resolver to use, or null to disable modules
      */
     public JSRuntime setModuleResolver(JSModuleResolver resolver) {
+        if (instance != null) {
+            throw new IllegalStateException("Already created");
+        }
         this.moduleResolver = resolver;
         return this;
     }
@@ -362,6 +365,9 @@ public class JSRuntime implements AutoCloseable {
                     if (memoryLimit > 0) {
                         fnRuntimeSetMemoryLimit(memoryLimit);
                     }
+                    if (moduleResolver != null) {
+                         fnSetLoader();
+                    }
                     complete(null);
                 }
             }).join();
@@ -562,6 +568,7 @@ public class JSRuntime implements AutoCloseable {
         data = fetch(pathPtr, pathLen);
         dealloc(pathPtr, pathLen);
         String path = new String(data, StandardCharsets.UTF_8);
+        //System.out.println("BASE="+base+" PATH="+path+".");
 
         String normalized = moduleResolver.normalize(path, base);
         if (normalized == null) {
@@ -569,7 +576,7 @@ public class JSRuntime implements AutoCloseable {
         }
         long ptrlen = store(normalized.getBytes(StandardCharsets.UTF_8));
         instance.memory().writeI32(outPtr, ptrlen2ptr(ptrlen)); // don't make presumptions about internals of ptrlen
-        instance.memory().writeI32(outPtr, ptrlen2len(ptrlen)); // write as two 32-bit words
+        instance.memory().writeI32(outPtr + 4, ptrlen2len(ptrlen)); // write as two 32-bit words
     }
 
     /**
@@ -585,6 +592,7 @@ public class JSRuntime implements AutoCloseable {
         byte[] data = fetch(namePtr, nameLen);
         dealloc(namePtr, nameLen);
         String name = new String(data, StandardCharsets.UTF_8);
+        //System.out.println("NAME="+name);
 
         String script = moduleResolver.load(name);
         if (script == null) {
@@ -592,7 +600,7 @@ public class JSRuntime implements AutoCloseable {
         }
         long ptrlen = store(script.getBytes(StandardCharsets.UTF_8));
         instance.memory().writeI32(outPtr, ptrlen2ptr(ptrlen)); // don't make presumptions about internals of ptrlen
-        instance.memory().writeI32(outPtr, ptrlen2len(ptrlen)); // write as two 32-bit words
+        instance.memory().writeI32(outPtr + 4, ptrlen2len(ptrlen)); // write as two 32-bit words
     }
 
     //-------------------------------------------------------------------------
@@ -616,6 +624,10 @@ public class JSRuntime implements AutoCloseable {
 
     private void fnRuntimeInitLogger(int level) {
         call("init_logger_wasm", level);
+    }
+
+    private void fnSetLoader() {
+        call("set_loader_wasm", getPointer());
     }
 
     //-------------------------------------------------------------------------
