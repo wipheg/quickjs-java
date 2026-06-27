@@ -297,10 +297,10 @@ public class JSRuntime implements AutoCloseable {
         return new HostFunction(set, name, FunctionType.of(in, out), (Instance instance, long... args) -> {
             try {
                 long[] result = func.apply(instance, args);
-                if (result == null) {
-                    getLogger().log(JSLogger.TRACE, "hear {}.{}{} = {}", set, name, args, result);
-                } else if (result.length == 1) {
+                if (result.length == 1) {
                     getLogger().log(JSLogger.TRACE, "hear {}.{}{} = {} ({} {})", set, name, args, result, ptrlen2ptr(result[0]), ptrlen2len(result[0]));
+                } else {
+                    getLogger().log(JSLogger.TRACE, "hear {}.{}{} = {}", set, name, args, result);
                 }
                 return result;
             } catch (RuntimeException e) {
