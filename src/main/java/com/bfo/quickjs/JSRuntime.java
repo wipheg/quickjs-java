@@ -556,25 +556,24 @@ public class JSRuntime implements AutoCloseable {
      * @param baseLen the length of the base string
      * @param pathPtr the pointer to the path string
      * @param pathLen the length of the path string
-     * @param outPtr a pointer to an eight-byte block, to which should be written the pointer and length of the normalized path
+     * @param outPtr a pointer to an eight-byte block, to which should be written the pointer and length of the normalized path, or 0/0 if resolve failed
      */
     private void fnResolveModule(int basePtr, int baseLen, int pathPtr, int pathLen, int outPtr) {
         if (moduleResolver == null) {
             throw new RuntimeException("No ModuleResolver");
         }
         byte[] data = fetch(basePtr, baseLen);
-        dealloc(basePtr, baseLen);
         String base = new String(data, StandardCharsets.UTF_8);
         data = fetch(pathPtr, pathLen);
-        dealloc(pathPtr, pathLen);
         String path = new String(data, StandardCharsets.UTF_8);
-        //System.out.println("BASE="+base+" PATH="+path+".");
+//        dealloc(basePtr, baseLen);    // Should we deallocate these?
+//        dealloc(pathPtr, pathLen);
 
-        String normalized = moduleResolver.normalize(path, base);
-        if (normalized == null) {
-            throw new RuntimeException("Normalize returned null");
-        }
-        long ptrlen = store(normalized.getBytes(StandardCharsets.UTF_8));
+        String normalized = null;
+        try {
+            normalized = moduleResolver.normalize(path, base);
+        } catch (Exception e) {}
+        long ptrlen = normalized == null ? 0 : store(normalized.getBytes(StandardCharsets.UTF_8));
         instance.memory().writeI32(outPtr, ptrlen2ptr(ptrlen)); // don't make presumptions about internals of ptrlen
         instance.memory().writeI32(outPtr + 4, ptrlen2len(ptrlen)); // write as two 32-bit words
     }
@@ -583,22 +582,20 @@ public class JSRuntime implements AutoCloseable {
      * Called to load a module
      * @param namePtr the pointer to the base string
      * @param nameLen the length of the base string
-     * @param outPtr a pointer to an eight-byte block, to which should be written the pointer and length of the normalized path
+     * @param outPtr a pointer to an eight-byte block, to which should be written the pointer and length of the module source, or 0/0 if load failed
      */
     private void fnLoadModule(int namePtr, int nameLen, int outPtr) {
         if (moduleResolver == null) {
             throw new RuntimeException("No ModuleResolver");
         }
         byte[] data = fetch(namePtr, nameLen);
-        dealloc(namePtr, nameLen);
-        String name = new String(data, StandardCharsets.UTF_8);
-        //System.out.println("NAME="+name);
-
-        String script = moduleResolver.load(name);
-        if (script == null) {
-            throw new RuntimeException("Module \"" + name + "\" returned null");
-        }
-        long ptrlen = store(script.getBytes(StandardCharsets.UTF_8));
+//        dealloc(namePtr, nameLen);            // Don't dealloc name! It's used in Rust after this method call.
+        String script = null;
+        try {
+            String name = new String(data, StandardCharsets.UTF_8);
+            script = moduleResolver.load(name);
+        } catch (Exception e) {}
+        long ptrlen = script == null ? 0 : store(script.getBytes(StandardCharsets.UTF_8));
         instance.memory().writeI32(outPtr, ptrlen2ptr(ptrlen)); // don't make presumptions about internals of ptrlen
         instance.memory().writeI32(outPtr + 4, ptrlen2len(ptrlen)); // write as two 32-bit words
     }
@@ -755,7 +752,9 @@ public class JSRuntime implements AutoCloseable {
                 public void run() {
                     long nameptrlen = store(name.getBytes(StandardCharsets.UTF_8));
                     long scriptptrlen = store(script.getBytes(StandardCharsets.UTF_8));
-                    long[] r = call("eval_module_wasm", ctx.getPointer(), ptrlen2ptr(nameptrlen), ptrlen2len(nameptrlen), ptrlen2ptr(scriptptrlen), ptrlen2len(scriptptrlen));
+                    scriptStart = System.currentTimeMillis();
+                    long[] r = call("eval_module_async_wasm", ctx.getPointer(), ptrlen2ptr(nameptrlen), ptrlen2len(nameptrlen), ptrlen2ptr(scriptptrlen), ptrlen2len(scriptptrlen));
+                    scriptStart = 0;
                     dealloc(nameptrlen);
                     dealloc(scriptptrlen);
                     long ptrlen = r[0];

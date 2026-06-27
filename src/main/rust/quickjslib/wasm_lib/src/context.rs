@@ -45,10 +45,9 @@ pub fn eval_script(ctx: &Ctx<'_>, script: String) -> rquickjs::Result<JSJavaProx
 }
 
 #[wasm_export]
-pub fn eval_module(ctx: &Ctx<'_>, name: String, script: String) -> rquickjs::Result<JSJavaProxy> {
-    debug!("Evaluating module: {}", script);
-    let module = Module::declare(ctx.clone(), name, script.clone())?;
-    let (_, promise) = module.eval()?;
+pub fn eval_module_async(ctx: &Ctx<'_>, name: String, script: String) -> rquickjs::Result<JSJavaProxy> {
+    debug!("Evaluating module: {} {}", name, script);
+    let promise = Module::evaluate(ctx.clone(), name, script)?;
     let result = JSJavaProxy::from_js(ctx, promise.into_value())?;
     Ok(result)
 }
