@@ -6,7 +6,8 @@ package com.bfo.quickjs;
 public interface JSType {
 
     /**
-     * Return an opaque pointer to the JS object
+     * Return an opaque pointer to the JS object, or 0 if the object is closed
+     * and should no longer be used
      */
     long getPointer();
 
@@ -14,4 +15,5 @@ public interface JSType {
      * Return the JS context this type belongs to
      */
     JSContext getContext();
+
 }

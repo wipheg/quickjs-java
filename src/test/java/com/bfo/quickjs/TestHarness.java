@@ -5,14 +5,19 @@ import org.junit.jupiter.api.Test;
 
 @SuppressWarnings({"rawtypes", "unchecked"})
 public class TestHarness {
+
     public static void main(String[] args) throws Exception {
         for (int i=0;i<args.length;i++) {
             JSLogger logger = JSLogger.toSystem(JSRuntime.class.getPackage().getName());
-            String s = args[i];
-            Class c = Class.forName(TestHarness.class.getPackage().getName() + "." + s);
+            String className = args[i], methodName = null;
+            if (className.indexOf(".") > 0) {
+                methodName = className.substring(className.indexOf(".") + 1);
+                className = className.substring(0, className.indexOf("."));
+            }
+            Class c = Class.forName(TestHarness.class.getPackage().getName() + "." + className);
             Object o = null;
             for (Method m : c.getDeclaredMethods()) {
-                if (m.isAnnotationPresent(Test.class)) {
+                if (m.isAnnotationPresent(Test.class) && (methodName == null || methodName.equals(m.getName()))) {
                     if (o == null) {
                         o = c.getDeclaredConstructor().newInstance();
                     }
@@ -22,4 +27,5 @@ public class TestHarness {
             }
         }
     }
+
 }

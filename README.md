@@ -18,7 +18,8 @@ There are a few projects taking this approach
 * [quickjs-wasm-java](https://github.com/StefanRichterHuber/quickjs-wasm-java), which is the basis for this API. Almost all of the Rust source in this repository was taken directly from that project.
 * [quickjs4j](https://github.com/roastedroot/quickjs4j), which uses [Javy](https://github.com/bytecodealliance/javy)
 
-The advantage is that rather than one-thread-per task, a single thread can be used to interleave operations on multiple contexts - much like `select(2)` in C, in fact.
+The advantage is that rather than one-thread-per task, a single thread can be used to interleave operations on multiple runtimes,
+much like `select(2)`. **QuickJS Java** has been tested with 1000 runtimes, all waiting on promises, all from a single Java thread.
 
 ## Building
 * Requirements: Java 21+ and Rust
@@ -43,7 +44,7 @@ import com.bfo.quickjs.*;
 JSRuntime js = new JSRuntime();
 JSContext ctx = js.newContext();
 Object o = ctx.eval("var x = 1 + 2; x");    // o = 3;
-JSObject m = (JSObject)ctx.eval("var x = {\"foo\":1 };  // implements Map
+JSObject m = (JSObject)ctx.evalNow("var x = {\"foo\":1 };  // implements Map
 m.put("bar", 3);
 o = ctx.eval("x.bar");    // o = 3;
 o = ctx.eval("throw new Error('fail')");  // o is a JSException
@@ -74,8 +75,8 @@ map.put("name", new JSComputedValue() {
   }
 });
 ctx.put("person", map);
-Object o = ctx.eval("person.first = 'John'; person.last = 'Smith'; person.name");   // = "John Smith"
-o = ctx.eval("person.name = 'Jim Jones'; person.first");                            //= "Jim"
+Object o = ctx.evalNow("person.first = 'John'; person.last = 'Smith'; person.name");   // = "John Smith"
+o = ctx.evalNow("person.name = 'Jim Jones'; person.first");                            //= "Jim"
 ```
 ### Annotations for simpler exporting to JavaScript
 The `@JSExport` annotation can be set on a class, which marks it as containing
@@ -122,18 +123,18 @@ public static class Person
 JSRuntime runtime = new JSRuntime();
 JSContext ctx = runtime.newContext();
 ctx.put("person", new Person());
-ctx.eval("person.first = 'John'; person.last = 'Smith'; person.name");  // = "John Smith"
-ctx.eval("person.name = 'Jim Jones'; person.first");                    // = "Jim"
-ctx.eval("person.greet(\"Hello\", 12)");                                // prints "Hello, Jim Jones you are 12"
-ctx.eval("person.min(5,4,9,1,3)");                                      // = 1
+ctx.evalNow("person.first = 'John'; person.last = 'Smith'; person.name");  // = "John Smith"
+ctx.evalNow("person.name = 'Jim Jones'; person.first");                    // = "Jim"
+ctx.evalNow("person.greet(\"Hello\", 12)");                                // prints "Hello, Jim Jones you are 12"
+ctx.evalNow("person.min(5,4,9,1,3)");                                      // = 1
 ```
 
 ### Async
 
-Asynchronous code is supported. Each JS promise is mirrored by a Java [CompleteableFuture](https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/concurrent/CompletableFuture.html), and completing one complete the other.
-Promises can be returned directly, or expressions can be wrapped in a promise by calling `evalAsync()`
-
-JavaScript is single threaded so the `poll()` method must be repeatedly called on the primary thread to check for queued events. Java promises may be completed on any thread, and their state will be reflected in JavaScript on the next call to `poll()`
+The examples so far have called `Object result = ctx.evalNow(script)`, which executes the code and waits for a response.
+In general it is a better idea to call `CompletableFuture<Object> result = ctx.eval(script)`. This immediately returns a Future
+that will evaluate to the object when it is resolved. Details on the process is described in the next section,
+but using this is very simple.
 
 ```java
 JSRuntime js = new JSRuntime();
@@ -160,36 +161,81 @@ context.put("delay", new Supplier<Object>() {
   }
 });
 
-CompletableFuture<?> future;
-future = (CompletableFuture<?>)ctx.eval("delay().then(x => 'all ' + x).then(x => log(x))");
-while (!future.isDone()) {
-  Thread.sleep(200);
-  ctx.poll();
-}
+ctx.eval("delay().then(x => 'all ' + x).then(x => log(x))").join();
 // Loop completes after 500ms with "all done" printed to System.out
 
-future = ctx.evalAsync("await new Promise((resolve) => { delay().then(x => 'all ' + x).then(resolve) })");
-while (!future.isDone()) {
-  Thread.sleep(200);
-  ctx.poll();
-}
-System.out.println(future.get());   // Same result as above.
+Object o = ctx.eval("await new Promise((resolve) => { delay().then(x => 'all ' + x).then(resolve) })").get();
+System.out.println(o);   // Same result as above.
 
 // Errors propagate up
-future = (CompletableFuture<?>)ctx.eval("delay().then(x => 'all ' + x).then(() => { throw new Error('fail') })");
-while (!future.isDone()) {
-  Thread.sleep(200);
-  ctx.poll();
-}
-System.out.println(future.get());   // Exception is thrown "Promise Rejected"
-
-future = ctx.evalAsync("await new Promise((resolve) => { delay().then(x => 'all ' + x).then(() => { throw new Error('fail'); }) })");
-while (!future.isDone()) {
-  ctx.poll();
-  Thread.sleep(200);
-}
-System.out.println(future.get());  // Exception is thrown "fail"
+ctx.eval("delay().then(x => 'all ' + x).then(() => { throw new Error('fail') })").join();  // throws "Promise Rejected"
+o = ctx.eval("await new Promise((resolve) => { delay().then(x => 'all ' + x).then(() => { throw new Error('fail'); }) })").get();  // throws "fail"
 ```
+
+### Threading details
+JavaScript is famously single-threaded, so for the above examples to work it's necessary to communicate with the JavaScript
+engine in a background thread. A JSRuntime marshalls all its communication with the JavaScript engine onto the same thread,
+which is managed internally by the library - **it is safe to share a context across multiple threads**. This isn't full
+concurrency - for example, if you iterate over a map in one thread and delete a value from it in another, a
+`ConcurrentModificationException` will be thrown. So don't do that. But calling `ctx.eval()` from multiple threads is fine.
+
+The exact details of the threading model are determined by a `TaskManager`, which can be set on the `JSRuntime`. Currently there
+are three options.
+
+```java
+JSRuntime runtime = new JSRuntime();
+runtime.setTaskManager(TaskManager.useSharedThread());  // one thread for all runtimes. The default
+runtime.setTaskManager(TaskManager.useOwnThread());     // one thread per runtime
+runtime.setTaskManager(TaskManager.useCurrentThread()); // no threading
+```
+* The _shared thread_ model uses a single background thread, interleaving tasks for multiple runtimes in sequence.
+  This is the default and for short-lived tasks (the JavaScript way) it's very effective, particularly
+  if those tasks are going to be largely waiting for promises to complete, eg for network or file access
+  (the "delay" example above has been tested with 1000 instances all running at once).
+  The thread is started on demand and closed shortly after the last runtime is closed.
+
+* The _own thread_ model is one thread per JSRuntime. The thread is started on demand and closed when the JSRuntime is closed
+
+* The _current thread_ model doesn't use threads. Everything is run on the current thread - it's up to you to
+  ensure this is done in a thread safe manner. For futures to complete it's necessary to regularly call poll:
+  ```java
+  JSRuntime runtime = new JSRuntime().withTaskManager(TaskManager.useCurrentThread());
+  JSContext ctx = runtime.newContext();
+  CompleteableFuture<Object> future = ctx.eval("delay().then(x => 'all ' + x).then(() => { throw new Error('fail') })");
+  while (!future.isDone()) {
+     ctx.poll();
+     Thread.sleep(20);
+  }
+  Object o = future.get();
+  ```
+
+### Runtime vs Context
+A _Runtime_ is fully isolated, and multiple _Contexts_ within the same Runtime are independent only because they don't
+have a pointer from one to the other. In theory it would be possible for one context to reference another (not implemented)
+or to create one Runtime and run many Contexts indepdently,
+but in practice there are problems with this (https://github.com/faceless2/quickjs-java/issues/5)
+For multiple tasks, for now the recommendation is create multiple Runtimes.
+```java
+
+// This works
+JSContext[] ctx = new JSContext[100];
+for (int i=0;i<ctx.length;i++) {
+    JSRuntime runtime = new JSRuntime();
+    ctx[i] = runtime.newContext();
+    ctx[i].put(...);
+    CompleteableFuture<Object> f = ctx[i].eval(...);
+}
+
+// For now, this doesn't
+JSRuntime runtime = new JSRuntime();
+JSContext[] ctx = new JSContext[100];
+for (int i=0;i<ctx.length;i++) {
+    ctx[i] = runtime.newContext();
+    ctx[i].put(...);
+    CompleteableFuture<Object> f = ctx[i].eval(...);
+}
+```
+
 
 ### Plumbing
 
@@ -224,21 +270,21 @@ JSContext ctx = js.newContext();
 ```java
 JSRuntime js = new JSRuntime();
 JSContext ctx = js.newContext();
-ctx.eval("let x = {'foo: 1}");
+ctx.evalNow("let x = {'foo: 1}");
 JSObject o1 = (JSObject)ctx.get("x");
 assert o1 != null;  // No! X is set in the lexical context, but not on this.
-ctx.eval("globalThis.x = {'foo: 1}");   // But either of these will work
-ctx.eval("var x = {'foo: 1}");
+ctx.evalNow("globalThis.x = {'foo: 1}");   // But either of these will work
+ctx.evalNow("var x = {'foo: 1}");
 
-JSObject o2 = (JSObject)ctx.eval("var x = {'foo: 1}; x");
-JSObject o3 = (JSObject)ctx.eval("x");
+JSObject o2 = (JSObject)ctx.evalNow("var x = {'foo: 1}; x");
+JSObject o3 = (JSObject)ctx.evalNow("x");
 assert o1 == o2;  // No! Different object each time. See https://github.com/faceless2/quickjs-java/issues/2
 
 ctx.put("myobject", o3);
 asssert ctx.get("myobject") == o3;  // Still no! Same problem.
 
 // JavaScript is complicated! This seems to be by design. Be careful.
-cctx.eval("var x = 1; globalThis.y = 2; let z = 3");
+ctx.evalNow("var x = 1; globalThis.y = 2; let z = 3");
 assert ctx.containsKey("x");
 assert ctx.containsKey("y");
 assert !ctx.containsKey("z");
@@ -246,19 +292,26 @@ ctx.remove("x");
 ctx.remove("y");
 assert !ctx.containsKey("x");
 assert !ctx.containsKey("y");
-assert "number".equals(ctx.eval("typeof x"));
-assert "undefined".equals(ctx.eval("typeof y"));
-assert "number".equals(ctx.eval("typeof z"));
+assert "number".equals(ctx.evalNow("typeof x"));
+assert "undefined".equals(ctx.evalNow("typeof y"));
+assert "number".equals(ctx.evalNow("typeof z"));
 ```
 Fixes here require changes at the Rust layer which are beyond my abililty - assistance welcome.
 
-My advise is that if an object is created in Java, **manage it in Java**: keep a reference to it and use that
+Best practice: if an object is created in Java, **manage it in Java**: keep a reference to it and use that
 reference to interact with it. Exporting it to JavaScript will export a proxy for the same object, and
 reimporting back into Java will give you a proxy for the proxy.
 
 
 ### Credits
-Very heavily based on `quickjs-wasm-java`, as mentioned. That project makes use of FunctionalInterfaces, which I found made simple things easier and harder things (eg methods with variable parameter lists) impossible. This difference and the original's dependency on `log4j` was the original reason for the rewrite and repackaging, however the Rust layer is largely unchanged.
+Very heavily based on `quickjs-wasm-java`, as mentioned. Main difference
+* no log4j dependency
+* no use of FunctionalInterfaces - I found they made working with variable-parameter functions much harder.
+* no longer single-threaded
+* API changes - although superficially `JSContext` is a `QuickJSContext`, be aware that `JSContext.eval` and `JSContext.evalNow`
+correspond to `QuickJSContext.evalAsync` and `QuickJSContext.eval`.
+
+However the Rust layer is largely unchanged, so a big thank you to Stefan for releasing it.
 
 
 
