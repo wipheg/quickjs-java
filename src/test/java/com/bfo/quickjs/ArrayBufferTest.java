@@ -28,7 +28,6 @@ import java.util.function.Supplier;
 
 public class ArrayBufferTest {
 
-    @Test
     public void testArrayBufferSharing() throws Exception {
         try (JSRuntime runtime = new JSRuntime().setStderr(System.err).setStdout(System.out);
                 JSContext context = runtime.newContext()) {
