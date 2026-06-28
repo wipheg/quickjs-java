@@ -4,6 +4,7 @@ import java.util.*;
 import java.util.concurrent.atomic.*;
 import java.util.concurrent.*;
 import java.util.function.*;
+import java.nio.*;
 import java.nio.charset.*;
 
 /**
@@ -154,6 +155,16 @@ public class JSContext extends AbstractMap<String,Object> implements AutoCloseab
      */
     public JSObject newObject() {
         return new JSObject(this, getRuntime().fnObjectCreate(this));
+    }
+
+    /**
+     * Create a new {@link ByteBuffer} backed by the WebAssembly memory for this runtime.
+     * The buffer can be passed to JavaScript as an ArrayBuffer without copying.
+     */
+    public ByteBuffer newBuffer(int size) {
+        JSRuntime.BufferAllocation allocation = getRuntime().newBuffer(size);
+        closeables.add(allocation);
+        return allocation.buffer();
     }
 
     /**
