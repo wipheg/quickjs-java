@@ -105,6 +105,8 @@ impl Resolver for JavaResolver {
             &mut string_result as *mut StringResult as u32
         ) };
 
+        if string_result.ptr == 0 { return Err(rquickjs::Error::new_resolving(base, name)); }
+
         let bytes = unsafe {
             std::slice::from_raw_parts(string_result.ptr as *const u8, string_result.len as usize)
         };
@@ -125,6 +127,9 @@ impl Loader for JavaLoader {
             name.len() as u32,
             &mut string_result as *mut StringResult as u32
         ) };
+
+        if string_result.ptr == 0 { return Err(rquickjs::Error::new_loading(name)); }
+
         let bytes = unsafe {
             std::slice::from_raw_parts(string_result.ptr as *const u8, string_result.len as usize)
         };
