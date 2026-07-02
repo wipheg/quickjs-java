@@ -129,6 +129,28 @@ ctx.evalNow("person.greet(\"Hello\", 12)");                                // pr
 ctx.evalNow("person.min(5,4,9,1,3)");                                      // = 1
 ```
 
+### Modules
+ES6 modules are supported - a module can be loaded by calling `evalModule`, and support for `import` is added by implementing the
+`JSModuleResolver` interface
+```java
+JSRuntime runtime = new JSRuntime();
+runtime.setModuleResolver(new JSModuleResolver() {
+    public String normalize(String path, String base) {
+        return path;
+    }
+    public String load(String path) {
+        if (path.equals("module.js")) {
+            return Files.readString(Path.of("path/to/module.js"));
+        }
+        return null; // Module loading failed.
+    }
+});
+JSContext ctx = runtime.newContext();
+String basejs = Files.readString(Path.of("path/to/base.js"));  // eg "import { foo } from 'module.js'; ..."
+CompletableFuture<Object> f = ctx.evalModule("base.js", basejs);
+f.join();  // Completed when everything has executed.
+```
+
 ### Async
 
 The examples so far have called `Object result = ctx.evalNow(script)`, which executes the code and waits for a response.
