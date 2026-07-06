@@ -13,6 +13,9 @@ import com.dylibso.chicory.wasm.types.*;
 
 final class JSRuntimeMemory implements com.dylibso.chicory.runtime.Memory {
 
+    // ByteBuffers keep the backing array alive, so reserve some room before pinning it.
+    private static final int SHARED_BUFFER_RESERVE_PAGES = 16;
+
     private final MemoryLimits limits;
     private final Object growLock = new Object();
     private final Map<Integer,Object> locks;
@@ -30,7 +33,10 @@ final class JSRuntimeMemory implements com.dylibso.chicory.runtime.Memory {
 
     ByteBuffer buffer(int ptr, int len) {
         checkBounds(ptr, len, sizeInBytes(), IllegalArgumentException::new);
-        pinned = true;
+        synchronized (growLock) {
+            ensureCapacity(Math.min(maximumPages(), pages + SHARED_BUFFER_RESERVE_PAGES));
+            pinned = true;
+        }
         return ByteBuffer.wrap(data, ptr, len).slice().order(ByteOrder.LITTLE_ENDIAN);
     }
 
@@ -65,7 +71,7 @@ final class JSRuntimeMemory implements com.dylibso.chicory.runtime.Memory {
                 if (pinned) {
                     return -1;
                 }
-                data = Arrays.copyOf(data, bytes);
+                ensureCapacity(next);
             }
             pages = next;
             return previous;
@@ -286,6 +292,14 @@ final class JSRuntimeMemory implements com.dylibso.chicory.runtime.Memory {
 
     private int sizeInBytes() {
         return bytes(pages);
+    }
+
+    private void ensureCapacity(int requiredPages) {
+        int capacityPages = Math.min(maximumPages(), Math.max(requiredPages, pages + SHARED_BUFFER_RESERVE_PAGES));
+        int capacityBytes = bytes(capacityPages);
+        if (capacityBytes > data.length) {
+            data = Arrays.copyOf(data, capacityBytes);
+        }
     }
 
     private static int bytes(int pages) {
